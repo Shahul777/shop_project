@@ -1,0 +1,3395 @@
+#  Copyright © 2020 Infosys Limited, Bangalore, India. All rights reserved.
+#  Version: 0.0.1
+#
+#  Except for any open source software components embedded in this Infosys proprietary software program (“Program”),
+#  this Program is protected by copyright laws, international treaties and other pending or existing intellectual
+#  property rights in India, the United States and other countries.Except as expressly permitted, any unauthorized
+#  reproduction, storage, transmission in any form or by any means (including without limitation electronic, mechanical,
+#  printing, photocopying, recording or otherwise), or any distribution of this Program, or any portion of it, may
+#  result in severe civil and criminal penalties, and will be prosecuted to the maximum extent possible under the law.
+#
+#
+#  Created by - javed.hussain at May 12, 2020
+import logging
+import os
+import traceback
+from datetime import datetime
+from typing import List, Dict
+
+import flask
+from flask import json, request
+from flask_cors import CORS
+
+from com.infosys.udd.database import database
+from com.infosys.udd.database.database import DatabaseWriter
+from com.infosys.udd.engine import execution_engine
+from com.infosys.udd.misc import utils
+from com.infosys.udd.misc.properties import configs
+from com.infosys.udd.models.db_models import Configuration, Entity
+
+# noinspection PyArgumentList
+def setup_logging():
+    logging_path = "./logs"
+    if not os.path.exists(logging_path):
+        os.makedirs(logging_path)
+    logging.basicConfig(level=logging.getLevelName(configs.get("LOGGING").data), handlers=[])
+    log_formatter = logging.Formatter('[%(asctime)s : %(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    root_logger = logging.getLogger()
+    root_logger.handlers = []
+    file_handler = logging.FileHandler(f'{logging_path}/{datetime.now().strftime("logfile_%Y-%m-%d")}.log')
+    file_handler.setFormatter(log_formatter)
+    root_logger.addHandler(file_handler)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(log_formatter)
+    root_logger.addHandler(console_handler)
+
+
+setup_logging()
+logging.info("Initializing Flask Application...")
+app = flask.Flask(__name__)
+CORS(app)
+app.config["DEBUG"] = False
+DatabaseWriter.start_now()
+
+
+@app.route('/setup', methods=['GET'])
+def setup_udd():
+    logging.info("Setting up database...")
+    api_res = APIResponse()
+    try:
+        database.setup_db()
+        api_res.set_message("Database Setup Completed Successfully...")
+        logging.info("Setup Completed successfully...")
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_message("Database Setup Failed. See exception for more details...")
+        api_res.set_exception(e)
+        logging.error(f'{type(e).__name__}: {e}')
+
+    response = app.response_class(
+        response=json.dumps(api_res.get_data()),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+
+    return response
+
+
+@app.route('/get_entities', methods=['GET'])
+def get_entities():
+    api_res = APIResponse()
+    entities = []
+    logging.info("Fetching all Entities...")
+
+    try:
+        entities = database.get_entities()
+        utils.list_to_json(entities)
+        api_res.set_message("Entities")
+        logging.info("Entities fetched successfully...")
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_message(" Failed. See exception for more details...")
+        api_res.set_exception(e)
+        logging.error("Error occurred while fetching entities " + str(e))
+
+    response = app.response_class(
+        response=utils.list_to_json(entities) if api_res.get_exception() is None else api_res.get_data(),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+
+    return response
+
+
+@app.route('/add_entity', methods=['POST'])
+def add_new_entity():
+    api_res = APIResponse()
+    logging.info("Adding new Entity...")
+
+    try:
+        request_json = request.get_json()
+        entity_identifier = request_json['entity_identifier']
+        entity_type = request_json['entity_type']
+        entity_args = request_json['entity_args']
+        entity_tags = request_json['entity_tags']
+        entity_description = request_json['entity_description']
+        entity = Entity(entity_identifier, entity_type, entity_args, entity_tags, entity_description)
+        result = database.add_new_entity(entity)
+        api_res.set_message(
+            {"entity_id": str(result), "message": "new entity created " + entity_identifier, "exception": "None"})
+        logging.info("Entity " + entity_identifier + " added successfully...")
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_exception(e)
+        api_res.set_message({"entity_id": None, "message": "Failed to create new entity,check exception",
+                             "exception": str(api_res.get_exception())})
+        logging.error(f'{type(e).__name__}: {e}')
+
+    response = app.response_class(
+        response=json.dumps(api_res.get_message()),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+
+    return response
+
+
+@app.route('/delete_entity', methods=['DELETE', 'POST'])
+def delete_entity():
+    api_res = APIResponse()
+    logging.info("Deleting Entity...")
+
+    try:
+        entity_id = request.form.get('entity_id')
+        val = database.delete_entity(entity_id)
+        if val == 1:
+            api_res.set_message({"entity_id": str(entity_id), "message": "Deleted entity", "exception": "None"})
+            logging.info("Entity with id - " + entity_id + " deleted successfully...")
+
+        else:
+            raise Exception("Entity with id " + entity_id + " does not exist")
+
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_exception(e)
+        api_res.set_message({"entity_id": None, "message": "Failed to delete entity,check exception",
+                             "exception": str(api_res.get_exception())})
+        logging.error(f'{type(e).__name__}: {e}')
+
+    response = app.response_class(
+        response=json.dumps(api_res.get_message()),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+
+    return response
+
+
+@app.route('/modify_entity', methods=['POST'])
+def modify_entity():
+    api_res = APIResponse()
+    logging.info("Modifying Entity...")
+    try:
+        request_json = request.get_json()
+        if database.modify_entity(request_json):
+            api_res.set_message({"entity_id": str(request_json['entity_id']),
+                                 "message": "entity modified " + request_json['entity_identifier'], "exception": None})
+            logging.info("Entity " + str(request_json['entity_id']) + " modified successfully...")
+        else:
+            raise Exception("Entity id doesn't exist in database")
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_exception(e)
+
+        api_res.set_message({"entity_id": None, "message": "Failed to modify entity,check exception",
+                             "exception": str(api_res.get_exception())})
+        logging.error(f'{type(e).__name__}: {e}')
+
+    response = app.response_class(
+        response=json.dumps(api_res.get_message()),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+
+    return response
+
+
+@app.route('/add_config', methods=['POST'])
+def add_new_config():
+    api_res = APIResponse()
+    logging.info("Adding Configuration...")
+    try:
+        request_json = request.get_json()
+        configuration_name = request_json['configuration_name']
+        entities_list = request_json['entities_list']
+        open_compressed_file = request_json['open_compressed_file']
+        force_text_read = request_json['force_text_read']
+        file_encoding = request_json['file_encoding']
+        config = Configuration(configuration_name, open_compressed_file, force_text_read, file_encoding)
+        config_id = database.add_new_config(config, entities_list)
+        api_res.set_message(
+            {"configuration_id": str(config_id), "message": "new configuration created " + configuration_name,
+             "exception": "None"})
+        logging.info("Configuration - " + configuration_name + " added successfully...")
+
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_exception(e)
+        api_res.set_message({"configuration_id": None, "message": "Failed to create new configuration,check exception",
+                             "exception": str(api_res.get_exception())})
+        logging.error(f'{type(e).__name__}: {e}')
+
+    response = app.response_class(
+        response=json.dumps(api_res.get_message()),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+
+    return response
+
+
+@app.route('/delete_config', methods=['DELETE', 'POST'])
+def delete_config():
+    api_res = APIResponse()
+    logging.info("Deleting configuration...")
+    try:
+        configuration_id = request.form.get('configuration_id')
+        val = database.delete_config(configuration_id)
+        if val == 1:
+            api_res.set_message(
+                {"configuration_id": str(configuration_id), "message": "Deleted configuratioon", "exception": "None"})
+            logging.info("Configuration with id" + str(configuration_id) + " deleted successfully...")
+        else:
+            raise Exception("Configuration with id " + str(configuration_id) + " does not exist")
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_exception(e)
+        api_res.set_message({"entity_id": None, "message": "Failed to delete configuration,check exception",
+                             "exception": str(api_res.get_exception())})
+        logging.error(f'{type(e).__name__}: {e}')
+
+    response = app.response_class(
+        response=json.dumps(api_res.get_message()),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+
+    return response
+
+
+@app.route('/get_configs', methods=['GET'])
+def get_configs():
+    api_res = APIResponse()
+    configs = []
+    logging.info("Fetching configurations...")
+
+    try:
+        configs = database.get_configs()
+        api_res.set_message("Configurations")
+        logging.info("Configurations fetched successfully...")
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_message(" Failed. See exception for more details...")
+        api_res.set_exception(e)
+        logging.error(f'{type(e).__name__}: {e}')
+
+    response = app.response_class(
+        response=configs if api_res.get_exception() is None else api_res.get_data(),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+    return response
+
+
+@app.route('/get_config_by_id', methods=['POST'])
+def get_config_by_id():
+    api_res = APIResponse()
+    config = None
+    logging.info("Fetching configuration by id...")
+    try:
+        config_id = request.form.get("configuration_id")
+        config = database.get_config(config_id, discovery=False)
+        if config:
+            api_res.set_message("Configuration with id " + str(config_id))
+            logging.info("Configuration by id " + str(config_id) + " fetched successfully...")
+        else:
+            raise Exception("Configuration with id " + str(config_id) + " does not exist")
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_message(" Failed. See exception for more details...")
+        logging.error(f'{type(e).__name__}: {e}')
+        api_res.set_exception(e)
+
+    response = app.response_class(
+        response=config if api_res.get_exception() is None else json.dumps(
+            api_res.get_data()),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+    return response
+
+
+@app.route('/modify_config', methods=['POST'])
+def modify_config():
+    api_res = APIResponse()
+    logging.info("Modifying  configuration...")
+    try:
+        request_json = request.get_json()
+        if database.modify_config(request_json):
+            api_res.set_message({"configuration_id": str(request_json['configuration_id']),
+                                 "message": "Configuration modified " + request_json['configuration_name'],
+                                 "exception": None})
+            logging.info("Configuration " + str(request_json['configuration_id']) + " modified successfully...")
+
+        else:
+            raise Exception("Configuration id doesn't exist in database")
+
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_exception(e)
+        api_res.set_message({"configuration_id": None, "message": "Failed to update Configuration,check exception",
+                             "exception": str(api_res.get_exception())})
+        logging.error(f'{type(e).__name__}: {e}')
+
+    response = app.response_class(
+        response=json.dumps(api_res.get_message()),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+
+    return response
+
+
+@app.route('/get_tags', methods=['GET'])
+def get_tags():
+    api_res = APIResponse()
+    tags = None
+    logging.info("Fetching entity tags...")
+    try:
+        tags = database.get_tags()
+        api_res.set_message("Tags")
+        logging.info("Entity tags fetched successfully...")
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_message(" Failed. See exception for more details...")
+        api_res.set_exception(e)
+        logging.error(f'{type(e).__name__}: {e}')
+    response = app.response_class(
+        response=tags if api_res.get_exception() is None else api_res.get_data(),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+    return response
+
+
+@app.route('/get_discovery_data', methods=['POST'])
+def get_discovery_data():
+    api_res = APIResponse()
+    data = None
+    logging.info("Fetching discovery data...")
+    process_id = None
+    try:
+        process_id = request.form.get("process_id")
+        data = database.get_discovery_data(process_id)
+
+        
+
+
+        utils.list_to_json(data)
+        api_res.set_message("Discovery Data")
+        logging.info("Discovery data with process id " + str(process_id) + " fetched successfully...")
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_message(" Failed to delete  Process " + process_id + ". see exception")
+        api_res.set_exception(e)
+        logging.error(f'{type(e).__name__}: {e}')
+    response = app.response_class(
+        response=utils.list_to_json(data) if api_res.get_exception() is None else api_res.get_data(),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+    return response
+
+
+@app.route('/get_process_details', methods=['POST'])
+def get_process_by_id():
+    api_res = APIResponse()
+    process = None
+    logging.debug("Fetching process details...")
+
+    try:
+        process_id = request.form.get("process_id")
+        process = database.get_process(process_id)
+        if process:
+            api_res.set_message("Process with id : " + str(process_id))
+            logging.debug("Details for the process " + str(process_id) + " fetched successfully...")
+        else:
+            raise Exception("Process with id " + process_id + " does not exist")
+
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_message(" Failed. See exception for more details...")
+        api_res.set_exception(e)
+        logging.error(f'{type(e).__name__}: {e}')
+
+    response = app.response_class(
+        response=utils.object_to_json(process, "json") if api_res.get_exception() is None else json.dumps(
+            api_res.get_data()),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+    return response
+
+
+@app.route('/get_process_status', methods=['POST'])
+def get_process_status():
+    api_res = APIResponse()
+    process_status = None
+    logging.debug("Fetching process status...")
+
+    try:
+        process_id = request.form.get("process_id")
+        process_status = database.get_process_status(process_id)
+        if process_status:
+            api_res.set_message("Process with id : " + str(process_id))
+            logging.debug("Status for process " + str(process_id) + " fetched successfully...")
+        else:
+            raise Exception("Process with id " + process_id + " does not exist")
+
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_message(" Failed. See exception for more details...")
+        api_res.set_exception(e)
+        logging.error(f'{type(e).__name__}: {e}')
+
+    response = app.response_class(
+        response=utils.dict_to_json({'status': process_status}) if api_res.get_exception() is None else json.dumps(
+            api_res.get_data()),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+    return response
+
+
+@app.route('/get_process_details_by_config_id', methods=['POST'])
+def get_process_by_config():
+    api_res = APIResponse()
+    process = None
+    logging.info("Fetching processes by config-id...")
+    try:
+        config_id = request.form.get("configuration_id")
+        process = database.get_process_by_config_id(config_id)
+        if process:
+            api_res.set_message("Process with config id : " + str(config_id))
+            logging.info("Details for the process with config id " + str(config_id) + " fetched successfully...")
+        # else:
+        #     raise Exception("Process with config id " + config_id + " does not exist")
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_message(" Failed. See exception for more details...")
+        api_res.set_exception(e)
+        logging.error(f'{type(e).__name__}: {e}')
+
+    response = app.response_class(
+        response=utils.list_to_json(process) if api_res.get_exception() is None else json.dumps(api_res.get_data()),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+    return response
+
+
+@app.route('/delete_process', methods=['DELETE', 'POST'])
+def delete_process():
+    api_res = APIResponse()
+    process_id = None
+    logging.info("Deleting process")
+    try:
+        process_id = request.form.get('process_id')
+        val = database.delete_process(process_id)
+        if val == 1:
+            api_res.set_message(("Deleted Process with id " + process_id))
+            logging.info("Process with " + process_id + " deleted successfully...")
+        else:
+            raise Exception("Process with id " + process_id + " does not exist")
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_message(" Failed to delete  Process " + process_id + ". see exception")
+        api_res.set_exception(e)
+        logging.error(f'{type(e).__name__}: {e}')
+
+    response = app.response_class(
+        response=json.dumps(api_res.get_data()),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+
+    return response
+
+
+@app.route('/discovery', methods=['POST'])
+def start_discovery():
+    api_res = APIResponse()
+    request_json = request.get_json()
+    logging.info("Starting the discovery execution...")
+    try:
+        configuration_id: int = request_json.get('config_id')
+        source_connection = request_json.get('source_connection')
+        file_types: List = request_json.get('file_types')
+        scan_type: int=request_json.get('scan_type')
+        ner_pref: int=request_json.get('ner_pref')
+
+        pid = execution_engine.start_discovery_engine(database.get_config(configuration_id), source_connection,
+                                                      file_types,scan_type,ner_pref)
+
+        api_res.set_message({"process_id": pid})
+        logging.info("Process started successfully...")
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_message(" Failed to start process. see exception")
+        api_res.set_exception(e)
+        logging.error(f'{type(e).__name__}: {e}')
+
+    response = app.response_class(
+        response=json.dumps(api_res.get_message()),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+
+    return response
+
+@app.route('/discover_data', methods=['POST'])
+def start_discover_data():
+    api_res = APIResponse()
+    request_json = request.get_json()
+    logging.info("Starting discovery")
+    try:
+        configuration_id: int = request_json.get('config_id')
+        data = request_json.get('data')
+
+        sensitive_data = execution_engine.start_discovery_engine(database.get_config(configuration_id),None,None,2,1,data)
+        sensitive_data=utils.list_to_json(sensitive_data)
+       
+        # sensitive_data=sensitive_data.replace('"document_path": "",',"")
+        # sensitive_data=sensitive_data.replace('"document_type": "",',"")
+        api_res.set_message("Discovery Data")
+        sensitive_data = json.loads(sensitive_data)
+        for i in sensitive_data:
+            del i['document_path']
+            del i['document_type']
+        sensitive_data=json.dumps(sensitive_data)
+
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_message(" Failed to start process. see exception")
+        api_res.set_exception(e)
+        logging.error(f'{type(e).__name__}: {e}')
+
+    response = app.response_class(
+        response=sensitive_data if api_res.get_exception() is None else api_res.get_data(),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+
+    return response
+@app.route('/tagging', methods=['POST'])
+def start_tagging():
+    api_res = APIResponse()
+    request_json = request.get_json()
+    logging.info("Starting the discovery execution...")
+    try:
+        configuration_id: int = request_json.get('config_id')
+        source_connection = request_json.get('source_connection')
+        file_types: List = request_json.get('file_types')
+        pid = execution_engine.start_tagging_engine(database.get_config(configuration_id), source_connection,
+                                                    file_types)
+        api_res.set_message({"process_id": pid})
+        logging.info("Process started successfully...")
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_message(" Failed to start process. see exception")
+        api_res.set_exception(e)
+        logging.error(f'{type(e).__name__}: {e}')
+
+    response = app.response_class(
+        response=json.dumps(api_res.get_message()),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+
+    return response
+
+
+@app.route('/masking', methods=['POST'])
+def preview_masking():
+    api_res = APIResponse()
+    request_json = request.get_json()
+    logging.info("Starting the masking execution...")
+    result = None
+    try:
+        configuration_name: str = request_json.get('config_name')
+
+        source_connection = request_json.get('source_connection')
+        target_connection = request_json.get('target_connection')
+        file_types: List = request_json.get('file_types')
+        is_preview: bool = request_json.get('is_preview')
+        masking_config: Dict = request_json.get('transformations')
+        result = execution_engine.start_masking_engine(database.get_config_by_name(configuration_name),
+                                                       source_connection, target_connection, file_types, is_preview,
+                                                       masking_config)
+        if not is_preview:
+            result = json.dumps({"process_id": result})
+        else:
+            result = json.dumps(result)
+        logging.info("Process started successfully...")
+    except Exception as e:
+        traceback.print_exc()
+        api_res.set_message(" Failed to start process. see exception")
+        api_res.set_exception(e)
+        logging.error(f'{type(e).__name__}: {e}')
+
+    response = app.response_class(
+        response=result if api_res.get_exception() is None else json.dumps(
+            api_res.get_data()),
+        status=200 if api_res.get_exception() is None else 500,
+        mimetype='application/json'
+    )
+
+    return response
+
+
+@app.teardown_appcontext
+def close(exception=None):
+    if exception is not None:
+        traceback.print_exc()
+    database.Session.remove()
+
+
+class APIResponse:
+
+    def __init__(self, message=None, exception=None):
+        self.__message = message
+        self.__exception = exception
+
+    def get_message(self):
+        return self.__message
+
+    def set_message(self, message):
+        self.__message = message
+
+    def get_exception(self):
+        return self.__exception
+
+    def set_exception(self, exception):
+        self.__exception = exception
+
+    def get_data(self):
+        return {
+            "message": self.__message,
+            "exception": str(self.__exception)
+        }
+the above code is api.py file
+
+#  Copyright © 2020 Infosys Limited, Bangalore, India. All rights reserved.
+#  Version: 0.0.1
+#
+#  Except for any open source software components embedded in this Infosys proprietary software program (“Program”),
+#  this Program is protected by copyright laws, international treaties and other pending or existing intellectual
+#  property rights in India, the United States and other countries.Except as expressly permitted, any unauthorized
+#  reproduction, storage, transmission in any form or by any means (including without limitation electronic, mechanical,
+#  printing, photocopying, recording or otherwise), or any distribution of this Program, or any portion of it, may
+#  result in severe civil and criminal penalties, and will be prosecuted to the maximum extent possible under the law.
+#
+#
+#  Created by - javed.hussain at May 12, 2020
+import logging
+from enum import Enum
+from queue import Queue
+from threading import Thread
+from time import sleep
+from typing import List
+
+from com.infosys.udd.handlers.base_entities import MatchedEntity, NamedEntity
+from com.infosys.udd.misc import utils
+from com.infosys.udd.misc.utils import log_error
+from com.infosys.udd.models.db_models import *
+
+# Database setup script
+file_path = os.path.abspath(os.path.join(UDD_LIB_PATH, 'runtime', 'script.sql'))
+setup_script = open(file_path).read()
+
+
+class DatabaseWriterState(Enum):
+    IDLE = 0
+    PAUSING = 1
+    PAUSED = 2
+    ACTIVE = 3
+
+
+class DatabaseWriter(Thread):
+    __instance = None
+    __state = DatabaseWriterState.IDLE
+    __data_queue = Queue(maxsize=0)
+
+    @staticmethod
+    def submit(data):
+        DatabaseWriter.__data_queue.put(data, block=False)
+        if DatabaseWriter.__state == DatabaseWriterState.IDLE:
+            DatabaseWriter.__state = DatabaseWriterState.ACTIVE
+
+    def run(self) -> None:
+        logging.debug(f'Threaded DBWriter started...')
+        DatabaseWriter.__is_paused = True
+        while True:
+            if DatabaseWriter.__state == DatabaseWriterState.ACTIVE:
+                if not DatabaseWriter.__data_queue.empty():
+                    data = DatabaseWriter.__data_queue.get(block=True, timeout=None)
+                    self.__add_to_db(data)
+                else:
+                    DatabaseWriter.__state = DatabaseWriterState.IDLE
+            elif DatabaseWriter.__state == DatabaseWriterState.PAUSING:
+                DatabaseWriter.__state = DatabaseWriterState.PAUSED
+            else:
+                sleep(0.5)
+
+    @staticmethod
+    def pause():
+        DatabaseWriter.__state = DatabaseWriterState.PAUSING
+        while not DatabaseWriter.__state == DatabaseWriterState.PAUSED:
+            pass
+
+    @staticmethod
+    def resume():
+        DatabaseWriter.__state = DatabaseWriterState.ACTIVE
+
+    @staticmethod
+    def __add_to_db(data):
+        try:
+            if isinstance(data, list):
+                Session.add_all(data)
+            else:
+                Session.add(data)
+            Session.flush()
+            Session.commit()
+        except Exception as e:
+            log_error("DatabaseWriter", "add_to_db", e)
+
+    @staticmethod
+    def start_now():
+        DatabaseWriter().start()
+
+    @staticmethod
+    def flush_and_commit():
+        DatabaseWriter.pause()
+        Session.flush()
+        Session.commit()
+        DatabaseWriter.resume()
+
+
+def setup_db():
+    # Mapping models to database
+    logging.debug("Started mapping models to db...")
+    Base.metadata.create_all(bind=engine)
+    # Calling external script to setup db
+    conn = engine.connect().connection
+    conn.executescript(setup_script)
+    conn.close()
+    logging.debug("Mapping completed...")
+
+
+def add_to_db(data):
+    if isinstance(data, list):
+        Session.add_all(data)
+    else:
+        Session.add(data)
+    DatabaseWriter.flush_and_commit()
+
+
+def get_entities():
+    return Entity.query.all()
+
+
+def add_new_entity(entity):
+    Session.add(entity)
+    DatabaseWriter.flush_and_commit()
+    entity_obj = Session.query(Entity.entity_id).order_by(Entity.entity_id.desc())
+    return entity_obj.first()[0]
+
+
+def delete_entity(entity_id):
+    result = Entity.query.filter_by(entity_id=entity_id).delete()
+    ConfigurationEntities.query.filter_by(entity_id=entity_id).delete()
+    DatabaseWriter.flush_and_commit()
+    return result
+
+
+def modify_entity(request_json):
+    entity_update_obj = Entity.query.filter_by(entity_id=request_json['entity_id']).first()
+
+    if entity_update_obj is not None:
+
+        entity_update_obj.entity_identifier = request_json['entity_identifier']
+        entity_update_obj.entity_type = request_json['entity_type']
+        entity_update_obj.entity_args = request_json['entity_args']
+        entity_update_obj.entity_args = request_json['entity_args']
+        entity_update_obj.entity_tags = request_json['entity_tags']
+        entity_update_obj.entity_description = request_json['entity_description']
+        DatabaseWriter.flush_and_commit()
+        return True
+    else:
+        return False
+
+
+def add_new_config(config: Configuration, entities_list: List):
+    Session.add(config)
+    DatabaseWriter.flush_and_commit()
+    config_obj = Configuration.query.filter_by(configuration_name=config.configuration_name).first()
+    config_id = config_obj.configuration_id
+    try:
+        for ent_id in entities_list:
+            Session.add(ConfigurationEntities(config_id, ent_id))
+        DatabaseWriter.flush_and_commit()
+    except Exception as e:
+        Session.delete(config_obj)
+        DatabaseWriter.flush_and_commit()
+        raise e
+    return config_id
+
+
+def modify_config(request_json):
+    config_update_obj: Configuration = Configuration.query.filter_by(
+        configuration_id=request_json['configuration_id']).first()
+    if config_update_obj is not None:
+        config_update_obj.configuration_name = request_json['configuration_name']
+        # config_update_obj.entities_list = request_json['entities_list']
+        config_update_obj.open_compressed_file = request_json['open_compressed_file']
+        config_update_obj.force_text_read = request_json['force_text_read']
+        config_update_obj.file_encoding = request_json['file_encoding']
+        temp_list: List = request_json['entities_list']
+        for ent in config_update_obj.entities:
+            if ent.entity_id not in temp_list:
+                Session.delete(ent)
+            else:
+                temp_list.remove(ent.entity_id)
+        for ent_id in temp_list:
+            Session.add(ConfigurationEntities(config_update_obj.configuration_id, ent_id))
+        DatabaseWriter.flush_and_commit()
+        return True
+    else:
+        return False
+
+
+def delete_config(configuration_id):
+    result = Configuration.query.filter_by(configuration_id=configuration_id).delete()
+    ConfigurationEntities.query.filter_by(configuration_id=configuration_id).delete()
+    DatabaseWriter.flush_and_commit()
+    return result
+
+
+def get_configs():
+    db_configs = Configuration.query.all()
+    configs = []
+    for db_config in db_configs:
+        config = utils.object_to_json(db_config)
+        config['entities_list'] = []
+        for ent in db_config.entities:
+            if ent.entity:
+                config['entities_list'].append(utils.object_to_json(ent.entity))
+        configs.append(config)
+    return json.dumps(configs, indent=4)
+
+
+def get_config(configuration_id: int, discovery=True):
+    db_config = Configuration.query.filter_by(configuration_id=configuration_id).first()
+    entities = []
+    ner_patterns = {}
+    if db_config:
+        config = utils.object_to_json(db_config)
+        for ent in db_config.entities:
+            if not discovery:
+                entities.append(utils.object_to_json(ent.entity))
+            else:
+                entity = ent.entity
+                if entity.entity_type.upper() == 'MATCHED':
+                    patterns = entity.entity_args['patterns']
+                    taggers = entity.entity_args['taggers']
+                    regex = create_regex(patterns, taggers)
+                    entities.append(MatchedEntity(entity.entity_identifier, regex))
+                elif entity.entity_type.upper() == 'NAMED':
+                    for p in entity.entity_args['patterns']:
+                        ner_patterns[p] = entity.entity_identifier
+        if len(ner_patterns) != 0:
+            entities.append(NamedEntity(ner_patterns))
+        config['entities_list'] = entities
+        if discovery:
+            return config
+        else:
+            return json.dumps(config, indent=4)
+
+
+def get_config_by_name(configuration_name: str, discovery=True):
+
+    db_config = Configuration.query.filter_by(configuration_name=configuration_name).first()
+    entities = []
+    ner_patterns = {}
+    if db_config:
+        config = utils.object_to_json(db_config)
+        for ent in db_config.entities:
+            if not discovery:
+                entities.append(utils.object_to_json(ent.entity))
+            else:
+                entity = ent.entity
+                if entity.entity_type.upper() == 'MATCHED':
+                    patterns = entity.entity_args['patterns']
+                    taggers = entity.entity_args['taggers']
+                    regex = create_regex(patterns, taggers)
+                    entities.append(MatchedEntity(entity.entity_identifier, regex))
+                elif entity.entity_type.upper() == 'NAMED':
+                    for p in entity.entity_args['patterns']:
+                        ner_patterns[p] = entity.entity_identifier
+        if len(ner_patterns) != 0:
+            entities.append(NamedEntity(ner_patterns))
+        config['entities_list'] = entities
+        if discovery:
+            return config
+        else:
+            return json.dumps(config, indent=4)
+
+
+def create_regex(patterns, taggers):
+    pattern_str = '(' + ')|('.join(patterns) + ')'
+    tagger_str = '(' + ')|('.join(taggers) + ')'
+    regex = f'({tagger_str}).{{,0}}\\s?(?P<sf_data>{pattern_str})'
+    return regex
+
+
+def get_process(process_id):
+    process = Processes.query.filter_by(pid=process_id).first()
+    return process
+
+
+def get_process_status(process_id):
+    process: Processes = Processes.query.filter_by(pid=process_id).first()
+    return process.status
+
+
+def get_process_by_config_id(config_id):
+    process = Processes.query.filter_by(config_id=config_id).all()
+    return process
+
+
+def delete_process(process_id):
+    result = Processes.query.filter_by(pid=process_id).delete()
+    DatabaseWriter.flush_and_commit()
+    return result
+
+
+def get_tags():
+    entities = Entity.query.all()
+    entity_tags = []
+    ent_tag_json = {}
+    for ent in entities:
+        for ent_tag in ent.entity_tags:
+            if ent_tag not in entity_tags:
+                entity_tags.append(ent_tag)
+    ent_tag_json["tags"] = entity_tags
+    return json.dumps(ent_tag_json)
+
+
+def get_discovery_data(p_id):
+    discovery_data = SensitiveField.query.filter_by(pid=p_id).all()
+    return discovery_data
+the above is database.by
+
+#  Copyright © 2020 Infosys Limited, Bangalore, India. All rights reserved.
+#  Version: 1.0
+#
+#  Except for any open source software components embedded in this Infosys proprietary software program (“Program”),
+#  this Program is protected by copyright laws, international treaties and other pending or existing intellectual
+#  property rights in India, the United States and other countries.Except as expressly permitted, any unauthorized
+#  reproduction, storage, transmission in any form or by any means (including without limitation electronic, mechanical,
+#  printing, photocopying, recording or otherwise), or any distribution of this Program, or any portion of it, may
+#  result in severe civil and criminal penalties, and will be prosecuted to the maximum extent possible under the law.
+#
+#
+#  Created by - javed.hussain at Sep 11, 2020
+import datetime
+import enum
+import time
+from typing import Dict
+
+from com.infosys.udd.database import database
+from com.infosys.udd.engine.execution_pipes import *
+from com.infosys.udd.misc.files_parser import FilesParser
+from com.infosys.udd.misc.utils import log_error, clear_sp_path, create_sp_temp
+from com.infosys.udd.models.db_models import Processes, Configuration
+from com.infosys.udd.pipeline.pipeline import Pipeline
+from com.infosys.udd.pipeline.pipeline_utils import PipelineException
+
+
+class ExecutionMode(enum.Enum):
+    DISCOVERY = 1
+    MASKING = 2
+    MASKING_PREVIEW = 3
+    TAGGING = 4
+
+
+class ExecutionEngine:
+
+    def __init__(self, config: Configuration, source_connection, file_types: List, execution_mode: ExecutionMode,scan_type=1,
+                 ner_pref=1,target_connection=None, masking_config: Dict = None):
+        self.__config = config
+        self.__source_connection = source_connection
+        self.__target_connection = target_connection
+        self.__file_types = file_types
+        self.__execution_mode = execution_mode
+        self.__scan_type=int(scan_type)
+        self.__ner_pref=int(ner_pref)
+        self.__masking_config = masking_config
+        self.__thread_pool = ThreadPoolExecutor(max_workers=1)
+
+    def start(self):
+        logging.info(f"Starting execution engine for {self.__execution_mode}...")
+        connection_type: str = self.__source_connection.get('connection_type')
+        connection_details = self.__source_connection.get('details')
+
+        if connection_type.upper() == "SHAREPOINT":
+            source_path = create_sp_temp()
+        elif connection_type.upper() == "FILESYSTEM":
+            if 'file_name' in connection_details.keys():
+                file_name = connection_details.get('file_name')
+                if not (file_name and file_name.strip()):
+                    raise Exception("Invalid file type.")
+                file_path = connection_details.get('source_path')
+                source_path = file_path + '/' + file_name
+            else:
+                source_path = connection_details.get('source_path')
+        else:
+            raise Exception("Invalid connection type.")
+
+        fp = FilesParser(source_path, self.__file_types, self.__config['open_compressed_file'])
+        p = Processes(directory_path=fp.get_directory_path(), total_documents_to_be_processed=fp.get_total_files(),
+                      documents_processed=fp.get_processed_count(), config_id=self.__config['configuration_id'],
+                      start_time=datetime.datetime.today(), updated_timestamp=datetime.datetime.today(),
+                      status="NOT_STARTED", execution_mode=self.__execution_mode.name,scan_type='Full_scan' if self.__scan_type else 'Quick_scan',
+                     
+                      )
+        database.add_to_db(p)
+        # ner_pref='without_transformer' if self.__ner_pref else 'with_transformer'
+        fut = self.__thread_pool.submit(ExecutionEngine.__start_pipeline, p.pid, self.__file_types,
+                                        self.__source_connection,
+                                        self.__config, self.__execution_mode, self.__target_connection,
+                                        self.__masking_config,self.__scan_type,self.__ner_pref)
+
+                                        # ner_pref='without_transformer' if self.__ner_pref else 'with_transformer'
+
+
+        # logging.info(f"Submitted process for - {p.pid}...")
+        # if self.__execution_mode == ExecutionMode.DISCOVERY:
+        #     wait([fut], timeout=None, return_when=ALL_COMPLETED)
+        #     logging.info(f"Inside Start Pipeleine  Discovery-")
+            
+        #     return p.pid
+
+        if self.__execution_mode == ExecutionMode.MASKING_PREVIEW:
+            wait([fut], timeout=None, return_when=ALL_COMPLETED)
+            logging.info(f"Inside Start Pipeleine Masking -")
+            return fut.result()
+        return p.pid
+
+    @staticmethod
+    def __start_pipeline(process_id, file_types, source_connection, config: Configuration, execution_mode,
+                         target_connection, masking_config,scan_type,ner_pref):
+        logging.info(f"Inside Start Pipeleine -")
+        try:
+            start_time = time.time()
+            process = Processes.query.filter_by(pid=process_id).first()
+            process.status = "RUNNING"
+            print(process)
+            DatabaseWriter.flush_and_commit()
+            source_details = source_connection.get('details')
+            source_type: str = source_connection.get('connection_type')
+            if execution_mode == ExecutionMode.MASKING and target_connection is None:
+                raise Exception("Target details must be provided in MASKING mode")
+
+            pipeline = Pipeline(process_id=process_id)
+            pipeline.set_context_data('process_id', process_id)
+            pipeline.set_context_data('sp_local_path', process.directory_path)
+            pipeline.set_context_data('config', config)
+            pipeline.set_context_data('has_error', False)
+            pipeline.set_context_data('error_message', None)
+            pipeline.set_context_data('quick_scan_dict', {})
+            pipeline.set_context_data('ner_pref_dict', {})
+
+            # connection_details=source_connection.get('details')
+            # connection_type:str=source_connection.get('connection_type')
+            if source_type.upper() == "FILESYSTEM":
+                if 'file_name' in source_details.keys():
+                    file_name = source_details.get('file_name')
+                    file_path = source_details.get('source_path')
+                    source_path = file_path + '/' + file_name
+                else:
+                    source_path = source_details.get('source_path')
+                pipeline.add_pipe(WindowsFileLister(file_types, config['open_compressed_file'],
+                                                     source_path, scan_type,ner_pref)).add_pipe(DataReader(scan_type,ner_pref)).add_pipe(
+                     DataDiscovery(scan_type,ner_pref)).add_pipe(SensitiveDataWriter())
+            else:
+                pipeline.add_pipe(
+                    SharePointFileLister(file_types, config['open_compressed_file'], source_details,scan_type,ner_pref)).add_pipe(
+                    DataReader(scan_type,ner_pref)).add_pipe(DataDiscovery(scan_type,ner_pref)).add_pipe(SensitiveDataWriter())
+
+            if execution_mode == ExecutionMode.MASKING or execution_mode == ExecutionMode.MASKING_PREVIEW:
+                pipeline.add_pipe(DataMasking(masking_config))
+            
+            pipeline.add_pipe(DiscoveryResults())
+            pipeline.represent()
+            pipeline.start()
+
+            # logging.info(f"SOLUTIONS -",pipeline.get_results())
+            if pipeline.get_context_data("has_error"):
+                if source_type.upper() == "SHAREPOINT":
+                    clear_sp_path(process.directory_path)
+                raise PipelineException(pipeline.get_context_data("error_message"))
+            if execution_mode == ExecutionMode.MASKING:
+                MaskingExecutor(sensitive_fields=pipeline.get_results()).start_masking(
+                    target_path=target_connection.get('details').get('source_path'))
+            if execution_mode == ExecutionMode.TAGGING:
+                try:
+                    DocumentTagger(sensitive_fields=pipeline.get_results()).start_tagging()
+                except Exception as e:
+                    log_error("DocumentTagger", error=e, method_name='start_tagging')
+            logging.debug(f"Waiting for process {process_id} to complete.")
+            ExecutionEngine.wait_for_process_completion(process_id)
+            if source_type.upper() == "SHAREPOINT":
+                clear_sp_path(process.directory_path)
+            logging.info(f"Process id - {process_id} completed in {time.time() - start_time:.2f}s.")
+            results = pipeline.get_results()
+            if execution_mode == ExecutionMode.MASKING_PREVIEW:
+                return MaskingPreviewResultFormatter.format(results)
+            return results
+        except PipelineException:
+            process = Processes.query.filter_by(pid=process_id).first()
+            process.status = "FAILED"
+            DatabaseWriter.flush_and_commit()
+
+    @staticmethod
+    def wait_for_process_completion(process_id):
+        process: Processes = Processes.query.filter_by(pid=process_id).first()
+        DatabaseWriter.flush_and_commit()
+        while process.total_documents_to_be_processed > process.documents_processed:
+            pass
+        process.status = "COMPLETED"
+        process.completed_time = datetime.datetime.today()
+        DatabaseWriter.flush_and_commit()
+
+
+def start_masking_engine(config: Configuration, source_connection, target_connection, file_types: List,
+                         is_preview: bool,
+                         masking_config: Dict):
+    engine = ExecutionEngine(config, source_connection, file_types,
+                             execution_mode=ExecutionMode.MASKING_PREVIEW if is_preview else ExecutionMode.MASKING,
+                             target_connection=target_connection, masking_config=masking_config)
+    return engine.start()
+
+
+def start_discovery_engine(config: Configuration, source_connection, file_types: List,scan_type,ner_pref,data=None):
+    if not (data):
+        engine = ExecutionEngine(config, source_connection, file_types, ExecutionMode.DISCOVERY, scan_type,ner_pref)
+        return engine.start()
+    else:
+        dd = DataDiscovery(2,ner_pref)
+        data_list = []
+
+        for line in data.splitlines(True):
+            data_list.append(
+                Data(1, 1, line, "", "", False))
+        if (data_list):
+            sensitive_data = dd.process(data_list)
+        else:
+            sensitive_data = dd.process([Data(1, 1, data, "", "", False)])
+        logging.info(f"Discovery completed")
+        return sensitive_data
+
+def start_tagging_engine(config: Configuration, source_connection, file_types: List):
+    engine = ExecutionEngine(config, source_connection, file_types, ExecutionMode.TAGGING)
+    return engine.start()
+the above code is execution_engine.py
+
+#  Copyright © 2020 Infosys Limited, Bangalore, India. All rights reserved.
+#  Version: 0.0.1
+#
+#  Except for any open source software components embedded in this Infosys proprietary software program (“Program”),
+#  this Program is protected by copyright laws, international treaties and other pending or existing intellectual
+#  property rights in India, the United States and other countries.Except as expressly permitted, any unauthorized
+#  reproduction, storage, transmission in any form or by any means (including without limitation electronic, mechanical,
+#  printing, photocopying, recording or otherwise), or any distribution of this Program, or any portion of it, may
+#  result in severe civil and criminal penalties, and will be prosecuted to the maximum extent possible under the law.
+#
+#
+#  Created by - javed.hussain at May 12, 2020
+import logging
+import urllib.parse
+from concurrent.futures import wait, ALL_COMPLETED
+from concurrent.futures.thread import ThreadPoolExecutor
+
+from com.infosys.udd.database import database
+from com.infosys.udd.database.database import DatabaseWriter
+from com.infosys.udd.misc.files_parser import *
+from com.infosys.udd.misc.properties import configs
+from com.infosys.udd.misc.utils import log_error, make_path
+from com.infosys.udd.models.db_models import Processes, Configuration
+from com.infosys.udd.models.dto_models import MaskingSensitiveField
+from com.infosys.udd.pipeline.pipeline import FinalPipe
+from com.infosys.udd.pipeline.pipeline import InitialPipe, MiddlePipe
+
+
+class FileLister(InitialPipe, ABC):
+
+    def __init__(self, file_types, open_compressed_file):
+        InitialPipe.__init__(self)
+        self.file_types = file_types
+        self.open_compressed_files = open_compressed_file
+
+
+class SharePointFileLister(FileLister):
+    def __init__(self, file_types, open_compressed_file, connection_details,scan_type,ner_pref):
+        FileLister.__init__(self, file_types, open_compressed_file)
+        self.__connection_details = connection_details
+        self.__scan_type=scan_type
+        self.__ner_pref=ner_pref
+
+    def start(self):
+        try:
+            logging.debug("Starting SharePoint Files Access...")
+            server_url: str = self.__connection_details.get('server_url')
+            relative_path: str = self.__connection_details.get('relative_path')
+            username: str = self.__connection_details.get('username')
+            password: str = self.__connection_details.get('password')
+            # logging.debug(f"Server URL : {server_url}\nRelative URL : {relative_path}\n"
+            #               f"Username : {username}\nPassword : {password}")
+            if not server_url or not relative_path or not username or not password:
+                raise Exception("Invalid credentials provided for SharePoint discovery.")
+            self.traverse_path(server_url, relative_path, username, password)
+        except Exception as e:
+            logging.error(e, exc_info=True)
+            self.set_context_data('has_error', True)
+            self.set_context_data('error_message', e)
+        finally:
+            self.completed()
+
+    @staticmethod
+    def request_data(url, username, password):
+        logging.debug(f"Requesting data from : {url}")
+        from requests_ntlm import HttpNtlmAuth
+        import requests
+        auth = HttpNtlmAuth(username, password)
+        request_header = {"Accept": "application/json;odata=verbose",
+                          "Content-Type": "application/json;odata=verbose",
+                          "odata": "verbose", "X-RequestForceAuthentication": "true"}
+
+        response = requests.get(url, auth=auth, headers=request_header, verify=False)
+
+        logging.debug(f"Response code : {response.status_code}")
+        logging.debug(f"Response Headers : {response.headers}")
+        response_list = [(response.json()), auth]
+        if response.status_code == 200:
+            return response_list
+
+    def download_file(self, server, filename, username, password):
+        local_path = os.path.join(self.get_context_data(key="sp_local_path"), filename.strip('/'))
+
+        local_path = make_path(local_path)
+        logging.debug(f'Downloading : {local_path}')
+
+        from requests_ntlm import HttpNtlmAuth
+        import requests
+
+        auth = HttpNtlmAuth(username, password)
+        download_url = urllib.parse.urljoin(server, f"_api/Web/GetFileByServerRelativeUrl('{filename}')/$value")
+        r = requests.get(download_url, auth=auth, stream=True)
+
+        with open(local_path, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=10240):
+                f.write(chunk)
+                f.flush()
+
+        logging.debug(f"Download completed : {local_path}")
+        if (self.__scan_type == 0):
+            qs_dict = self.get_context_data("quick_scan_dict")
+            qs_dict[local_path] = 0
+            self.set_context_data('quick_scan_dict', qs_dict)
+        self.get_next_pipe().submit(local_path)
+
+    def traverse_path(self, server, path, username, password):
+
+        path = urllib.parse.quote(path)
+        logging.debug(f"Traversing : {path}")
+
+        if 'file_name' in self.__connection_details.keys():
+            target_file = self.__connection_details.get('file_name')
+            files_url = urllib.parse.urljoin(server, f"_api/Web/GetFolderByServerRelativeUrl('{path}')/Files")
+            files = self.request_data(files_url, username, password)[0]['d']['results']
+            for file in files:
+                file_type = get_file_type(file['ServerRelativeUrl'])
+                if file_type in self.file_types:
+                    if file['ServerRelativeUrl'] == target_file:
+                        self.increment_document_count()
+                        if self.get_context_data('has_error'):
+                            logging.debug(f"Pipeline has some error. Skipping further reading.")
+                            raise Exception(self.get_context_data('error_message'))
+                        else:
+                            self.download_file(server, file['ServerRelativeUrl'], username, password)
+        else:
+
+            folders_url = urllib.parse.urljoin(server, f"_api/Web/GetFolderByServerRelativeUrl('{path}')/Folders")
+            folders = self.request_data(folders_url, username, password)[0]['d']['results']
+
+            for folder in folders:
+                self.traverse_path(server, folder['ServerRelativeUrl'], username, password)
+
+            files_url = urllib.parse.urljoin(server, f"_api/Web/GetFolderByServerRelativeUrl('{path}')/Files")
+            files = self.request_data(files_url, username, password)[0]['d']['results']
+
+            for file in files:
+                file_type = get_file_type(file['ServerRelativeUrl'])
+                if file_type in self.file_types or (files_url == 'ARCHIVE' and self.open_compressed_files):
+                    self.increment_document_count()
+                    if self.get_context_data('has_error'):
+                        logging.debug(f"Pipeline has some error. Skipping further reading.")
+                        raise Exception(self.get_context_data('error_message'))
+                    else:
+                        self.download_file(server, file['ServerRelativeUrl'], username, password)
+
+    def increment_document_count(self):
+        p = Processes.query.get(self.get_context_data('process_id'))
+        p.total_documents_to_be_processed += 1
+        DatabaseWriter.flush_and_commit()
+
+
+class WindowsFileLister(FileLister):
+
+    def __init__(self, file_types, open_compressed_file, source_path,scan_type,ner_pref):
+        FileLister.__init__(self, file_types, open_compressed_file)
+        self.__source_path = source_path
+        self.__scan_type=scan_type
+        self.__ner_pref=ner_pref
+    def start(self):
+        try:
+            self.parse_files(self.__source_path)
+        except Exception as e:
+            logging.error(e, exc_info=True)
+            self.set_context_data('has_error', True)
+            self.set_context_data('error_message', e)
+        finally:
+            self.completed()
+
+    def parse_files(self, directory_path):
+        if os.path.isfile(directory_path):
+            head, file = os.path.split(directory_path)
+            if get_file_type(file) in self.file_types:
+                if self.get_context_data('has_error'):
+                    logging.debug("Pipeline has some error. Skipping further reading.")
+                    return
+                else:
+                    if (self.__scan_type is 0):
+                        qs_dict = self.get_context_data("quick_scan_dict")
+                        qs_dict[os.path.join(head, file)] = 0
+                        self.set_context_data('quick_scan_dict', qs_dict)
+                    if self.__ner_pref is 0:
+                        ner_dict = self.get_context_data("ner_pref_dict")
+                        ner_dict[os.path.join(head, file)] = 0
+                        self.set_context_data('ner_pref_dict', ner_dict)
+                    self.get_next_pipe().submit(os.path.join(head, file))
+            elif self.open_compressed_files:
+                path = extract_files(file, head)
+                if path is not None:
+                    self.parse_files(path)
+        else:
+            for root, d_names, f_names in os.walk(directory_path):
+                for file in f_names:
+                    if get_file_type(file) in self.file_types:
+                        if self.get_context_data('has_error'):
+                            logging.debug("Pipeline has some error. Skipping further reading.")
+                            return
+                        else:
+
+                            if(self.__scan_type == 0):
+                                qs_dict = self.get_context_data("quick_scan_dict")
+                                qs_dict[os.path.join(root, file)]=0
+                                self.set_context_data('quick_scan_dict', qs_dict)
+                            if self.__ner_pref == 0:
+                                ner_dict = self.get_context_data("ner_pref_dict")
+                                ner_dict[os.path.join(root, file)]=0
+                            self.get_next_pipe().submit(os.path.join(root, file))
+                    elif self.open_compressed_files:
+                        path = extract_files(file, root)
+                        if path is not None:
+                            self.parse_files(path)
+
+
+class DataReader(MiddlePipe):
+
+    def __init__(self,scan_type,ner_pref):
+        MiddlePipe.__init__(self)
+        self.__scan_type=scan_type
+        self.__ner_pref=ner_pref
+
+    def process(self, data):
+        try:
+
+            handler = get_file_handler(data)
+            logging.debug(f"Reading data from : {handler.doc_path}")
+
+            for d in handler:
+                if(self.__scan_type == 0):
+                    qs_dict = self.get_context_data("quick_scan_dict")
+                    if(qs_dict[handler.doc_path] ==  1):
+                        logging.debug(f"Sensitive data found,Stopped  further reading from : {handler.doc_path}")
+                        break
+                self.get_next_pipe().submit(d)
+            logging.info(f"Completed reading from : {handler.doc_path}")
+        except Exception as e:
+            if configs.get("SKIP_FAILED").data.lower() == 'false':
+                raise e
+            else:
+                logging.error(f"Error occurred while reading file : {data}, Skipping!!!")
+                self.update_processed_documents()
+
+    def update_processed_documents(self):
+        p = Processes.query.get(self.get_context_data('process_id'))
+        p.documents_processed += 1
+        DatabaseWriter.flush_and_commit()
+
+
+class DataDiscovery(MiddlePipe):
+
+    def __init__(self, scan_type, ner_pref):
+        MiddlePipe.__init__(self)
+        self.__results_count = 0
+        self.__thread_pool_executor = ThreadPoolExecutor()
+        self.__scan_type=scan_type
+        self.__ner_pref=ner_pref
+
+    def process(self, data):
+
+
+        if(self.__scan_type==0):
+
+                quick_scan_result = []
+                document_path = data[0].document_path
+                qs_dict = self.get_context_data("quick_scan_dict")
+                if(qs_dict[document_path]==0):
+                    qs_status = 0
+                    for entity in self.get_context_data("config")['entities_list']:
+                        quick_scan_result=entity.evaluate(data, self.get_context_data('process_id'),self.__scan_type,self.__ner_pref)
+                        if(quick_scan_result):
+                            document_status = {document_path: 1}
+                            qs_dict.update(document_status)
+                            self.set_context_data('quick_scan_dict',qs_dict )
+                            self.__results_count=1
+                            self.update_processed_documents()
+                            self.get_next_pipe().submit(quick_scan_result)
+                            qs_status = 1
+                            break
+
+                    if qs_status == 0:
+                        if len(data) > 0 and data[-1].is_final_block:
+                            self.update_processed_documents()
+            # if len(quick_scan_result) != 0:
+        elif (self.__scan_type == 2):
+            config: Configuration = database.get_config(2)
+            
+
+            futures = [
+                self.__thread_pool_executor.submit(entity.evaluate, data, 1, 1,self.__ner_pref)
+
+                for entity in config['entities_list']
+            ]
+            self.__results_count += sum([len(fut.result()) for fut in futures])
+            result = []
+            for fut in futures:
+                if len(fut.result()) != 0:
+                    for i in fut.result():
+                        result.append(i)
+            return result
+
+        else:
+            futures = [
+                self.__thread_pool_executor.submit(entity.evaluate, data, self.get_context_data('process_id'),self.__scan_type,self.__ner_pref)
+                for entity in self.get_context_data("config")['entities_list']
+            ]
+            wait(futures, timeout=None, return_when=ALL_COMPLETED)
+            if len(data) > 0 and data[-1].is_final_block:
+                self.update_processed_documents()
+            self.__results_count += sum([len(fut.result()) for fut in futures])
+            for fut in futures:
+                if len(fut.result()) != 0:
+                    self.get_next_pipe().submit(fut.result())
+
+
+    def update_processed_documents(self):
+        p = Processes.query.get(self.get_context_data('process_id'))
+        p.documents_processed += 1
+        DatabaseWriter.flush_and_commit()
+
+
+class SensitiveDataWriter(MiddlePipe):
+
+    def __init__(self):
+        MiddlePipe.__init__(self)
+
+    def process(self, data):
+        DatabaseWriter.submit(data)
+        self.get_next_pipe().submit(MaskingSensitiveField.bulk_transform(data))
+
+
+class DataMasking(MiddlePipe):
+
+    def __init__(self, masking_config):
+        from com.infosys.udd.masking.algorithms import Algorithms
+        MiddlePipe.__init__(self, no_of_workers=1)
+        self.__algorithms = Algorithms(masking_config)
+
+    def process(self, data):
+        for msf in data:
+            self.__algorithms.mask(msf)
+        self.get_next_pipe().submit(data)
+
+
+class DiscoveryResults(FinalPipe):
+    def __init__(self):
+        FinalPipe.__init__(self)
+        self.__data = {}
+
+    def get_results(self):
+        return self.__data
+
+    def process(self, data):
+        for msf in data:
+            self.__data.setdefault(msf["document_path"], []).append(msf)
+
+
+class MaskingPreviewResultFormatter:
+
+    @staticmethod
+    def format(results: dict):
+        for k, v in results.items():
+            temp = results[k]
+            results[k] = []
+            for data in temp:
+                results[k].append(data)
+        return results
+
+
+class MaskingExecutor:
+
+    def __init__(self, sensitive_fields):
+        self.sensitive_fields = sensitive_fields
+
+    def start_masking(self, target_path):
+        try:
+            logging.debug(f"Started file Masking")
+            for key, values in self.sensitive_fields.items():
+                logging.debug(f"Processing file : {key}")
+                get_file_handler(key).anonymize(values, target_path=target_path)
+        except Exception as e:
+            log_error('MaskingExecutor', 'mask', e)
+            raise e
+
+
+class DocumentTagger:
+    def __init__(self, sensitive_fields):
+        self.sensitive_fields = sensitive_fields
+
+    def start_tagging(self):
+
+        logging.debug(f"Started file Tagging")
+        for key, values in self.sensitive_fields.items():
+            logging.debug(f"Processing file : {key}")
+            try:
+                get_file_handler(key).tag(values)
+            except Exception as e:
+                log_error(self.__class__.__name__, error=e, method_name='start_tagging')
+                raise e
+the above on is execution_pipes.py
+
+#  Copyright © 2020 Infosys Limited, Bangalore, India. All rights reserved.
+#  Version: 0.0.1
+#
+#  Except for any open source software components embedded in this Infosys proprietary software program (“Program”),
+#  this Program is protected by copyright laws, international treaties and other pending or existing intellectual
+#  property rights in India, the United States and other countries.Except as expressly permitted, any unauthorized
+#  reproduction, storage, transmission in any form or by any means (including without limitation electronic, mechanical,
+#  printing, photocopying, recording or otherwise), or any distribution of this Program, or any portion of it, may
+#  result in severe civil and criminal penalties, and will be prosecuted to the maximum extent possible under the law.
+#
+#
+#  Created by - javed.hussain at May 12, 2020
+import logging
+import re
+import time
+from abc import ABCMeta, abstractmethod
+from concurrent.futures.process import ProcessPoolExecutor
+from typing import List
+
+import en_core_web_md
+import en_core_web_trf
+
+from com.infosys.udd.handlers.file_handlers import Data
+from com.infosys.udd.misc.entity_validation import validate_credit_card, validate_cardnum, \
+    udd_are_non_numerically_enclosed, validate_ssn, optimise_address, optimise_user_id, validate_cvv, get_cvv_pattern
+from com.infosys.udd.misc.entity_validation import validate_password, find_sec_ques, validate_idpasswordcombo
+from com.infosys.udd.models.db_models import SensitiveField
+
+nlp_model = en_core_web_md.load()
+nlp_model1 = en_core_web_trf.load()
+
+SF_REGEX_TAG = "sf_data"
+
+credit_regex="(^(?:4[0-9]{12}(?:[0-9]{3})?|(?:5[1-5][0-9]{2}| 222[1-9]|22[3-9][0-9]|2[3-6][0-9]{2}|27[01][0-9]|2720)[0-9]{12}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|6(?:011|5[0-9]{2})[0-9]{12}|(?:2131|1800|35\\d{3})\d{11})$)|(\d{4}\.\d{4}\.\d{4}\.\d{3,4}|\d{4}\-\d{4}\-\d{4}\-\d{3,4}|\d{4} \d{4} \d{4} \d{3,4}|\d{8} \d{8}|\d{4} \d{6} \d{6}|\d{16}|\d{15})"
+
+
+
+
+class Entity(metaclass=ABCMeta):
+
+    def __init__(self, identifier):
+        self.identifier = identifier
+
+    @abstractmethod
+    def evaluate(self, data_set: List[Data], process_id, scan_type,ner_pref):
+        pass
+
+
+class NamedEntity(Entity):
+    
+    def __init__(self, ner_patterns):
+
+        
+        super().__init__("Named Entity")
+        self.ner_patterns = ner_patterns
+        self.__ex = ProcessPoolExecutor()
+
+    def evaluate(self, data_set, process_id, scan_type, ner_pref):
+        result = []
+        logging.debug("Processing nlp pipeline")
+        for data in data_set:
+            result.extend(self.evaluate_data(data, process_id, ner_pref))
+        logging.debug("Processed Pipeline.")
+        return result
+
+    def evaluate_data(self, data, process_id,ner_pref):
+        result = []
+        start = time.time()
+        if ner_pref == 0:
+            doc = nlp_model1(data.text_data)
+            logging.info("Loading Spacy Transformer Model for NER..")
+        elif ner_pref == 1:
+            doc = nlp_model(data.text_data)
+            logging.info("Loading Spacy Model for NER..")
+
+        logging.debug(f"Took {time.time() - start}s to process {len(data.text_data)} characters.")
+        for ent in doc.ents:
+            if ent.label_ in self.ner_patterns:
+                post_text = data.text_data[ent.end_char: ent.end_char + 50]
+                pre_text = data.text_data[ent.start_char - 50: ent.start_char]
+                sf = SensitiveField(pid=process_id, document_path=data.document_path,
+                                    sub_segment=data.sub_segment, entity_name=self.ner_patterns[ent.label_],
+                                    text=ent.text, pre_text=pre_text, post_text=post_text,
+                                    document_type=data.document_type, segment=data.segment,
+                                            line_number=0, page_number=0)
+                result.append(sf)
+        return result
+
+
+class MatchedEntity(Entity):
+    
+
+    def __init__(self, identifier, regex):
+        
+
+  
+        super().__init__(identifier)
+        self.regex = re.compile(regex, flags=re.IGNORECASE)
+
+    def evaluate(self, data_set, process_id, scan_type,ner_pref):
+        result = []
+        for data in data_set:
+            result.extend(self.evaluate_data(data, process_id))
+            if (result and scan_type == 0):
+                return result[:1]
+        return result
+
+    def evaluate_data(self, data, process_id):
+        result = []
+        # cc_formats_with_spans = [(i.group(), i.span()) for i in re.finditer(self.regex, data.text_data)]
+        # print(cc_formats_with_spans)
+        non_numerically_enclosed_identifiers = ['Bank Account Number', 'phone_no', 'IP Address', 'pin']
+        try:
+            if (self.identifier == 'address'):
+             
+                data.text_data = data.text_data.strip('\n')
+                address = optimise_address(data.text_data)
+                if (address):
+                    sf = SensitiveField(pid=process_id, document_path=data.document_path,
+                                        sub_segment=data.sub_segment, entity_name=self.identifier,
+                                        text=address, pre_text="",
+                                        post_text="",
+                                        document_type=data.document_type, segment=data.segment,
+                                                line_number=0, page_number=0)
+                    result.append(sf)
+            elif (self.identifier == 'Sec Ques'):
+        
+                data.text_data = data.text_data.strip('\n')
+                sensitive_result = find_sec_ques(data.text_data)
+                if (sensitive_result):
+                    sf = SensitiveField(pid=process_id, document_path=data.document_path,
+                                        sub_segment=data.sub_segment, entity_name=self.identifier,
+                                        text=sensitive_result[0], pre_text=sensitive_result[1],
+                                        post_text=sensitive_result[2],
+                                        document_type=data.document_type, segment=data.segment,
+                                                line_number=0, page_number=0)
+                    result.append(sf)
+            elif (self.identifier=='cvv'):
+             
+                sensitive_result = validate_cvv(get_cvv_pattern(), data.text_data)
+                if (sensitive_result):
+                    sf = SensitiveField(pid=process_id, document_path=data.document_path,
+                                        sub_segment=data.sub_segment, entity_name=self.identifier,
+                                        text=sensitive_result[0], pre_text=sensitive_result[1],
+                                        post_text=sensitive_result[2],
+                                        document_type=data.document_type, segment=data.segment,
+                                                line_number=0, page_number=0)
+                    result.append(sf)
+            else:
+             
+                for match in re.finditer(self.regex, data.text_data):
+                    flag = 1
+                   
+                    if(self.identifier == 'UserIdPass Combo'):
+                     
+                        user_range, pwd_range = validate_idpasswordcombo(match.string)
+                        if len(user_range) == len(pwd_range):
+                            for i in range(len(user_range)):
+                                user_id = optimise_user_id([(data.text_data[user_range[i][0]:user_range[i][1]], (user_range[i][0], user_range[i][1]))], data.text_data)
+                                if not user_id:
+                                    flag = 0
+                                else:
+                                    user_id[1]='userid: '+user_id[1]
+                                    password = validate_password([(data.text_data[pwd_range[i][0]:pwd_range[i][1]], (pwd_range[i][0], pwd_range[i][1]))], data.text_data)
+                                    if (password):
+                                        password[1]='password: '+password[1]
+                                        sf = SensitiveField(pid=process_id, document_path=data.document_path,
+                                                        sub_segment=data.sub_segment, entity_name=self.identifier,
+                                                        text=user_id[1]+" , "+password[1], pre_text=password[0],
+                                                        post_text=password[2],
+                                                        document_type=data.document_type, segment=data.segment,
+                                                    line_number=0, page_number=0)
+                                        result.append(sf)
+                            else: flag = 0
+                            continue
+
+
+                    start, end = match.start(SF_REGEX_TAG), match.end(SF_REGEX_TAG)
+                    if (self.identifier == 'Credit Card'):
+                    
+                        if not (validate_credit_card([(data.text_data[start:end], (start, end))], data.text_data)):
+                            flag = 0
+                    if (self.identifier == 'iin_dinnersclub'):
+                       
+                        if not (validate_credit_card([(data.text_data[start:end], (start, end))], data.text_data)):
+                            flag = 0
+                    if (self.identifier == 'Combo Credit Card'):
+                      
+                        card_num = (re.match(credit_regex, data.text_data[start:end])).group(0)
+                        # if not (validate_credit_card([(data.text_data[start:end],(start,end))],data.text_data)):
+                        #     flag = 0
+                        if not validate_cardnum(card_num):
+                            flag = 0
+
+                    if (self.identifier in non_numerically_enclosed_identifiers):
+                        data.text_data=data.text_data.strip()
+                        if not udd_are_non_numerically_enclosed([(data.text_data[start:end], (start, end))], data.text_data):
+                            flag = 0
+                        else:
+                            number=""
+                            for i in data.text_data[start:end]:
+                                if i.isdigit():
+                                    number+=i
+
+                            if len(number)!=0 and str(number) == str(number)[0] * len(str(number)):
+                                flag=0
+
+
+                    if (self.identifier == 'user id'):
+                        
+                        # if(end-start)>40:
+                        #     end=start+40
+                        user_id = optimise_user_id([(data.text_data[start:end], (start, end))], data.text_data)
+                        if not user_id:
+                            flag = 0
+                        else:
+                            sf = SensitiveField(pid=process_id, document_path=data.document_path,
+                                                sub_segment=data.sub_segment, entity_name=self.identifier,
+                                                text=user_id[1], pre_text=user_id[0],
+                                                post_text=user_id[2],
+                                                document_type=data.document_type, segment=data.segment,
+                                                line_number=0, page_number=0)
+                            result.append(sf)
+                            continue
+
+                    if (self.identifier in ['SSN', 'EIN', 'ITIN', 'TIN']):
+                        
+                        if not validate_ssn(self.identifier, [(data.text_data[start:end], (start, end))], data.text_data):
+                            flag = 0
+
+                    if (self.identifier == 'password'):
+                       
+                        password = validate_password([(data.text_data[start:end], (start, end))], data.text_data)
+                        if (password):
+                            sf = SensitiveField(pid=process_id, document_path=data.document_path,
+                                                sub_segment=data.sub_segment, entity_name=self.identifier,
+                                                text=password[1], pre_text=password[0],
+                                                post_text=password[2],
+                                                document_type=data.document_type, segment=data.segment,
+                                                line_number=0, page_number=0)
+                            result.append(sf)
+                            continue
+                        else:
+                            flag = 0
+
+
+                    if (flag == 1):
+                        sf = SensitiveField(pid=process_id, document_path=data.document_path,
+                                            sub_segment=data.sub_segment, entity_name=self.identifier,
+                                            text=data.text_data[start:end], pre_text=data.text_data[start - 20:start],
+                                            post_text=data.text_data[end:end + 21],
+                                            document_type=data.document_type, segment=data.segment,
+                                                line_number=0, page_number=0)
+                        result.append(sf)
+        except:
+            logging.debug(f"Issue for entity..{self.identifier} for {data}, Values with spans: {(data.text_data[start:end], (start, end))}", exc_info=True)
+        return result
+the above one is base_entities.py
+
+
+#  Copyright © 2020 Infosys Limited, Bangalore, India. All rights reserved.
+#  Version: 1.0
+#
+#  Except for any open source software components embedded in this Infosys proprietary software program (“Program”),
+#  this Program is protected by copyright laws, international treaties and other pending or existing intellectual
+#  property rights in India, the United States and other countries.Except as expressly permitted, any unauthorized
+#  reproduction, storage, transmission in any form or by any means (including without limitation electronic, mechanical,
+#  printing, photocopying, recording or otherwise), or any distribution of this Program, or any portion of it, may
+#  result in severe civil and criminal penalties, and will be prosecuted to the maximum extent possible under the law.
+#
+#
+#  Created by - javed.hussain at Nov 12, 2020
+
+import jpype.imports
+from jpype import *
+
+from com.infosys.udd.misc.properties import *
+
+# place all the required jars (Jars formed out of user defined classes and supporting java jars) in Jars folder
+
+jars_dir_path = os.path.join(UDD_LIB_PATH, 'jars')
+list_of_jar_names = os.listdir(jars_dir_path)
+list_of_jars_for_classpath = list(map(lambda orig_string: os.path.join(jars_dir_path, orig_string), list_of_jar_names))
+classpath = os.pathsep.join(list_of_jars_for_classpath)
+jpype.startJVM(getDefaultJVMPath(), "-ea", "-Djava.class.path=%s" % classpath, convertStrings=False)
+
+
+class Algorithms:
+
+    def __init__(self, json):
+        self.__algorithms = {}
+        self.__config_reader = JClass(ALGORITHM_CONFIG_READER_CLASS)
+        self.parse(json)
+
+    def parse(self, json):
+        transformations = json
+        for transformation in transformations:
+            entity = transformation['entity_name']
+            masking_rules = transformation['masking_rules']
+            rules = []
+            for rule in masking_rules:
+                algorithm = JClass(
+                    str(self.__config_reader.getAlgoConfiguration(JString(rule['algorithm'])).getIdentifier()))()
+                params = JClass(CONFIG_PARAMS_CLASS)()
+                for k, v in rule['params'].items():
+                    params.addParam(JString(k), JString(v))
+                algorithm.init(params)
+                rules.append(algorithm)
+            self.__algorithms[entity] = rules
+
+    def mask(self, data):
+        data_to_mask = data['original_text']
+        for algorithm in self.__algorithms.setdefault(data['entity_name'], []):
+            data_to_mask = str(algorithm.execute(JString(data_to_mask)))
+        data['masked_text'] = data_to_mask
+the above one is inside masking folder called algorithms.py
+
+#  Copyright © 2020 Infosys Limited, Bangalore, India. All rights reserved.
+#  Version: 0.0.1
+#
+#  Except for any open source software components embedded in this Infosys proprietary software program (“Program”),
+#  this Program is protected by copyright laws, international treaties and other pending or existing intellectual
+#  property rights in India, the United States and other countries.Except as expressly permitted, any unauthorized
+#  reproduction, storage, transmission in any form or by any means (including without limitation electronic, mechanical,
+#  printing, photocopying, recording or otherwise), or any distribution of this Program, or any portion of it, may
+#  result in severe civil and criminal penalties, and will be prosecuted to the maximum extent possible under the law.
+#
+#
+#  Created by - visakh.padmanabhan at Feb 17, 2021
+import re
+from os import path
+import logging
+from commonregex import CommonRegex
+import usaddress, zipcodes
+import os
+import inspect
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+# For credit_card
+from com.infosys.udd.misc.STOP_WORDS import STOP_WORDS
+
+exclusion_list = [i.lower() for i in
+                  ['pass', 'NA', 'N/A', 'quite', 'amount', 'well', 'often', 'i', 'for', 'due', 'third', 'mightn\'t',
+                   'were', 'too', 'another', 'such', 'might', 'keep', 'herself', 'over', 'almost', 'put', 'further',
+                   'can', 'make', 'you', 'become', 'only', 'she\'s', 'otherwise', 'while', 'wouldn', 'a', 'moreover',
+                   'doing', 'since', 'against', 'doesn', 'aren', 'anyhow', 'some', 'amongst', 'an', 'doesn\'t',
+                   'don\'t', 'my', 'twenty', 'without', 'afterwards', 'therein', 'etc', 'fill', 'became', 'call',
+                   'eleven', 'she', 'themselves', 'thence', 'done', 't', 'you\'ve', 'whereas', 'made', 'cannot', 'down',
+                   'having', 'full', 'should', 'kg', 'd', 'part', 'into', 'still', 'hundred', 'it\'s', 'behind', 'now',
+                   'get', 'each', 'wherein', 'may', 'in', 'few', 'towards', 'upon', 'something', 'somehow', 'me',
+                   'thru', 'weren\'t', 'whereafter', 'yours', 'ours', 'also', 'hasn', 'myself', 'somewhere', 'several',
+                   'ourselves', 'itself', 'would', 'co', 'someone', 'why', 'which', 'they', 'had', 'thereafter', 'hers',
+                   'elsewhere', 'yourselves', 'latterly', 'con', 'you\'re', 'four', 'along', 'nowhere', 'because', 'of',
+                   'everything', 'who', 'do', 'across', 'will', 'whole', 'on', 'thick', 've', 'but', 'every', 'is',
+                   'nor', 'once', 'm', 'indeed', 'first', 'has', 'name', 'cry', 'show', 'what', 'needn\'t', 'this',
+                   'noone', 'more', 'mostly', 'except', 'next', 'either', 'onto', 'll', 'could', 'everywhere', 'that',
+                   'mill', 'was', 'latter', 'bottom', 'five', 'whenever', 'toward', 'you\'ll', 'last', 'beside',
+                   'found', 'much', 'neither', 'nobody', 'sixty', 'seeming', 'when', 'or', 'his', 'cant', 'sometimes',
+                   'together', 'should\'ve', 'ain', 'with', 'after', 'those', 'yourself', 'must', 'not', 'used', 'its',
+                   'before', 'being', 'at', 'no', 'anywhere', 'sincere', 'throughout', 'between', 'whither', 'whose',
+                   'does', 'shan', 'than', 'even', 'again', 'during', 'until', 'won\'t', 'weren', 'aren\'t', 'herein',
+                   'isn', 'their', 'describe', 'hadn', 'system', 'own', 'around', 'needn', 'them', 'fifty', 'all', 'ma',
+                   'side', 'whatever', 'other', 'enough', 'most', 'hereafter', 'nine', 'see', 'really', 'one',
+                   'hereupon', 'anyway', 'none', 'been', 'nevertheless', 'whether', 'eight', 'off', 'hereby', 'out',
+                   'per', 'isn\'t', 'shouldn', 'meanwhile', 'take', 'wherever', 'perhaps', 'empty', 'are', 'always',
+                   'wasn', 'ie', 'how', 'already', 'mustn\'t', 'and', 'about', 'give', 'find', 'seem', 'therefore',
+                   'regarding', 'nothing', 'hasn\'t', 'km', 'her', 'if', 'up', 'unless', 'among', 's', 'be', 'haven\'t',
+                   'through', 'never', 'besides', 'won', 'as', 'namely', 'please', 'seems', 'top', 'haven', 'shan\'t',
+                   'fifteen', 'thin', 'forty', 'else', 'though', 'interest', 'six', 'it', 'former', 'fire', 'two',
+                   'couldnt', 'bill', 'least', 'three', 'alone', 'say', 'inc', 'mustn', 'de', 'hadn\'t', 'mine',
+                   'however', 'wasn\'t', 'anyone', 'he', 'above', 'front', 'whereupon', 'couldn', 'serious', 'seemed',
+                   'back', 'am', 'didn', 'many', 'detail', 'amoungst', 'both', 'here', 'then', 'thus', 'whence', 'we',
+                   'beyond', 'within', 'below', 'rather', 'very', 'couldn\'t', 'mightn', 'formerly', 'that\'ll', 'ten',
+                   'everyone', 'did', 'others', 'any', 'becoming', 'him', 'our', 'ever', 'you\'d', 'yet', 'less', 'to',
+                   'via', 'thereupon', 'becomes', 'twelve', 'himself', 'wouldn\'t', 'hasnt', 'anything', 'so', 'where',
+                   'didn\'t', 'by', 'the', 'don', 'just', 'various', 'from', 'your', 'although', 'move', 'eg', 'go',
+                   'whoever', 're', 'under', 'shouldn\'t', 'ltd', 'these', 'o', 'using', 'beforehand', 'hence',
+                   'theirs', 'thereby', 'y', 'whereby', 'computer', 'there', 'same', 'un', 'whom', 'have', 'us',
+                   'sometime', 'screen', 'requirements', 'section', 'prompt', 'process', 'option', 'bitcoin', 'numbers',
+                   'completely', 'correct', 'change', 'freaking', 'sufficient', 'combination', 'constantly', 'creation',
+                   'requests', 'prompted', 'online', 'blocked', 'properly', 'security', 'everyday', 'either', 'feature',
+                   'letter', 'related', 'number', 'thanks', 'perfect', 'instead', 'longer', 'asking', 'message',
+                   'written', 'through', 'disappeared', 'secure', 'verification', 'method', 'recovery', 'tried',
+                   'right', 'repeatedly', 'saved', 'errors', 'details', 'certainly', 'remotely', 'information',
+                   'managers', 'required', 'circle', 'fields', 'select', 'passcode', 'available', 'history', 'passport',
+                   'olb', 'gmail', 'yahoo', 'outlook', 'ssn', 'fed', 'card', 'case', 'party', 'tax', 'phone', 'email',
+                   'fake', 'military-issued', 'military', 'issued', 'valid', 'trans', 'transaction', 'employer', 'employee',
+                   'university', 'postal', 'sss', 'student', 'std', 'commission', 'acceptable', 'form', 'forms', 'state-issued',
+                   'state', 'usa', 'photo', 'national', 'real', 'invalid','device']]
+
+username_regex = re.compile(
+    r"""
+    ^                       # beginning of string
+    (?!\b(?:(?:[0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\.){3}(?:[0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\b) 
+    # no ip address
+    (?!(\([0-9]{3}\)[ -]?|[0-9]{3}-)[0-9]{3}-[0-9]{4}$) # no phone number
+    (?!_$)                  # no only _
+    (?!(.)\1{1,}$)          # no repeted character
+    (?![-.])                # no - or . at the beginning
+    (?!.*[_.-]{2})          # no __ or _. or ._ or .. or -- inside
+    [a-zA-Z0-9_.\-@]+         # allowed characters, atleast one must be present
+    (?<![.-])               # no - or . at the end
+    $                       # end of string
+    """,
+    re.X,
+)
+
+current_directory=os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
+
+UDD_LIB_PATH = os.getenv('UDD_SERVICE_LIB')
+
+with open(os.path.join(UDD_LIB_PATH, 'ExID.csv'), "r", encoding = "ISO-8859-1") as f:
+    ExID = f.read().split()
+
+
+def validate_credit_card(values_with_spans, data):
+    print("VALIDATING CREDIT CARD",values_with_spans)
+    
+    val = udd_are_non_numerically_enclosed(values_with_spans, data)
+    
+    if (val):
+        cc_num2 = ""
+        for i in val[0]:
+            if (str(i)).isdigit():
+                cc_num2 += str(i)
+        cc_num3 = cc_num2
+        # reverse the credit card number
+        cc_num2 = cc_num2[::-1]
+        # convert to integer list
+        cc_num2 = [int(x) for x in cc_num2]
+        # double every second digit
+        doubled_second_digit_list = list()
+        digits = list(enumerate(cc_num2, start=1))
+        for index, digit in digits:
+            if index % 2 == 0:
+                doubled_second_digit_list.append(digit * 2)
+            else:
+                doubled_second_digit_list.append(digit)
+        # add the digits if any number is more than 9
+        doubled_second_digit_list = [((x % 10) + (x // 10)) for x in doubled_second_digit_list]
+        # sum all digits
+        sum_of_digits = sum(doubled_second_digit_list)
+        # return True or False
+
+        if (sum_of_digits % 10 == 0):
+            if CardIssuer(cc_num3):
+                
+
+
+                return True
+    return False
+
+
+
+
+##Check enclosed values
+
+def udd_are_non_numerically_enclosed(values_with_spans, data):
+    end = len(data) - 1
+    found_list = []
+    value = str(values_with_spans[0])
+    if values_with_spans and not value.isspace():
+        for value in values_with_spans:
+            span = value[1]
+            if span[0] > 0 and span[1] <= end:  # ssn[0] is SSN and ssn[1] is span that has (start,end). span[0] is start and span[1] is end
+                if not data[span[0] - 1].isnumeric() and not data[span[1]].isnumeric():
+                    delim = None
+                    if '.' in value[0]:
+                        delim = r'.'
+                    elif '-' in value[0]:
+                        delim = r'-'
+                    elif ' ' in value[0]:
+                        delim = r'.'
+                    if delim:
+                        if re.match(delim, data[span[0] - 1]) and re.match(delim, data[span[1]]):
+                            if span[0] > 1 and span[1] <= end - 1:
+                                if not data[span[0] - 2].isnumeric() and not data[span[1] + 1].isnumeric():
+                                    found_list.append(value[0])
+                            elif span[0] > 1:
+                                if not data[span[0] - 2].isnumeric():
+                                    found_list.append(value[0])
+                            elif span[1] <= end - 1:
+                                if not data[span[1] + 1].isnumeric():
+                                    found_list.append(value[0])
+                            else:
+                                found_list.append(value[0])
+                        elif not re.match(delim, data[span[0] - 1]) and re.match(delim, data[span[1]]):
+                            if span[1] <= end - 1:
+                                if not data[span[1] + 1].isnumeric():
+                                    found_list.append(value[0])
+                            else:
+                                found_list.append(value[0])
+                        elif re.match(delim, data[span[0] - 1]) and not re.match(delim, data[span[1]]):
+                            if span[0] > 1:
+                                if not data[span[0] - 2].isnumeric():
+                                    found_list.append(value[0])
+                            else:
+                                found_list.append(value[0])
+                        else:
+                            found_list.append(value[0])
+                    else:
+                        found_list.append(value[0])
+            elif span[0] > 0:  # Accepts SSNs like 'kl;123-12-2345' Rejects SSNs like 'kl;3123-12-2345'
+                if not data[span[0] - 1].isnumeric():
+                    delim = None
+                    if '.' in value[0]:
+                        delim = r'.'
+                    elif '-' in value[0]:
+                        delim = r'-'
+                    elif ' ' in value[0]:
+                        delim = r'.'
+                    if delim:
+                        if re.match(delim, data[span[0] - 1]):
+                            if span[0] > 1:
+                                if not data[span[0] - 2].isnumeric():
+                                    found_list.append(value[0])
+                            else:
+                                found_list.append(value[0])
+                        else:
+                            found_list.append(value[0])
+                    else:
+                        found_list.append(value[0])
+            elif span[1] <= end:  # Accepts SSNs like '123-12-2345kfa' Rejects SSNs like '123-12-234501-09-1928'
+                if not data[span[1]].isnumeric():
+                    delim = None
+                    if '.' in value[0]:
+                        delim = r'.'
+                    elif '-' in value[0]:
+                        delim = r'-'
+                    elif ' ' in value[0]:
+                        delim = r'.'
+                    if delim:
+                        if re.match(delim, data[span[1]]):
+                            if span[1] <= end - 1:
+                                if not data[span[1] + 1].isnumeric():
+                                    found_list.append(value[0])
+                            else:
+                                found_list.append(value[0])
+                        else:
+                            found_list.append(value[0])
+                    else:
+                        found_list.append(value[0])
+            else:
+                found_list.append(value[0])
+    return found_list
+
+
+
+def CardIssuer(number):
+    print("ISSUER CHECK",number)
+    # number2 = ""
+    # for i in number:
+    #     number2+=str(i)
+    # number2=number2[::-1]
+    
+    number2 = number
+    cardtype = "other"
+
+    if len(number2) == 15:
+        if number2[:2] == "34" or number2[:2] == "37":
+            cardtype = "American Express"
+    if len(number2) == 16:
+        if number2[:4] == "6011":
+            cardtype = "Discover"
+        elif number2[:2] == "67" or number2[:4] == "5018" or number2[:4] =="5020" or number2[:4] =="5038" or number2[:4] =="5612" or number2[:4] == "5893" or number2[:4] =="6304" or number2[:4] =="6759" or number2[:4] =="6761" or number2[:4] =="6762" or number2[:4] =="6763" or number2[:4] =="0604" or number2[:4] =="6390":
+            cardtype = "Maestro"
+        # 5018, 5020, 5038, 5612, 5893, 6304, 6759, 6761, 6762, 6763, 0604, 6390 
+        elif number2[:2] =="60" or number2[:2] =="65" or number2[:2] =="81" or number2[:2] =="82" or number2[:2] =="82" :
+            cardtype = "Rupay"
+        elif number2[:3] =="508":
+            cardtype = "Rupay"
+
+        elif int(number2[:2]) >= 51 and int(number2[:2]) <= 55:
+            cardtype = "Master Card"
+        elif number2[:1] == "4":
+            cardtype = "Visa"
+        elif number2[:4] == "3528" or number2[:4] == "3529":
+            cardtype = "JCB"
+        elif int(number2[:3]) >= 353 and int(number2[:3]) <= 359:
+            cardtype = "JCB"
+    if len(number2) in [14, 15, 16] and cardtype=="other":
+        if number2[:2] == "36":
+            cardtype = "Diners"
+        elif number2[:2] == "38":
+            cardtype = "Diners"
+        elif int(number2[:2]) == 30 and (int(number2[3]) in [0,1,2,3,4,5]):
+            cardtype = "Diners"
+    if len(number2) == 19:
+        if number2[:2] == "67":
+            cardtype = "Maestro"
+
+    return (cardtype in ["American Express","Discover","Master Card","Visa","JCB","Diners","Rupay","Maestro"])
+
+
+
+def validate_cardnum(cc_num):
+    
+    cc_num2 = ""
+    for i in cc_num:
+        if (str(i)).isdigit():
+            cc_num2 += str(i)
+    cc_num3 = cc_num2
+    # reverse the credit card number
+    cc_num2 = cc_num2[::-1]
+    # convert to integer list
+    cc_num2 = [int(x) for x in cc_num2]
+    # double every second digit
+    doubled_second_digit_list = list()
+    digits = list(enumerate(cc_num2, start=1))
+    for index, digit in digits:
+        if index % 2 == 0:
+            doubled_second_digit_list.append(digit * 2)
+        else:
+            doubled_second_digit_list.append(digit)
+    # add the digits if any number is more than 9
+    doubled_second_digit_list = [((x % 10) + (x // 10)) for x in doubled_second_digit_list]
+    # sum all digits
+    sum_of_digits = sum(doubled_second_digit_list)
+    # return True or False
+   
+    if (sum_of_digits % 10 == 0):
+        
+        if CardIssuer(cc_num3):
+            return True
+    
+    return False
+
+
+def is_safe_id(id, regex=username_regex, min_length=4):
+    if min_length and len(id) < min_length:
+        return False
+    if not re.match(regex, id):
+        return False
+    return True
+
+
+def optimise_user_id(tags_with_index, data):
+    user_pass_splitters = ":,-,is,as,be,id, can be ,:-,->, equalto ,being,=,#,_".split(",")
+    text = []
+    found_user_ids = []
+    # for tag_index_pair in tags_with_index:
+    #        tag = tag_index_pair[0]
+    index = tags_with_index[0][1][0]
+    value_string = data[index:].replace('.', ' ').replace(',', ' ').replace('?', ' ').replace(';',' ')  # The end of sentences or strings are replace by space to get proper password string after splitting by space
+
+    value_string = re.sub(r'[^\x00-\x7f]', r'', value_string)
+    value_string = re.sub("[ \n\t]+", ' ', value_string.lower())
+
+    IdExRegex = """(\b(case|party|tax|phone|fake|invalid)\b)"""
+    if re.search(IdExRegex, value_string.lower()):
+        value_string = ""
+    if re.search("(invalid)|(not valid)", value_string.lower()):
+        value_string = ""
+
+    flag = 0
+    flag1 = 0
+    pretext = []
+    post_text = []
+    for value in value_string.split():
+        cleaned_value = value.replace('"', '').replace('\'','')  # Eliminates Strings having quotes and splitters can be of length 2, as they can be wrongly validated in next if condition.
+        if len(cleaned_value) > 1 and cleaned_value not in user_pass_splitters and cleaned_value not in STOP_WORDS:  # Simple strings having just splitters like :,-,-> are to exempted.
+            if flag == 1:
+                post_text.append(value)
+                flag1 = 1
+            else:
+                if value.strip() not in ExID and is_safe_id(value.strip()):
+                    text.append(value)
+                    flag = 1
+                    continue
+        if flag == 0:
+            pretext.append(value)
+        if flag == 1 and flag1 == 0:
+            post_text.append(value)
+
+    if text:
+        found_user_ids.append(" ".join(pretext))
+        found_user_ids.append(" ".join(text))
+        found_user_ids.append(" ".join(post_text))
+        return found_user_ids
+
+
+def optimise_address(data):
+    regexParser = CommonRegex()
+    zipflag = 0
+    found_address = ''
+    finalList = []
+    covered_entity = []
+    normalized_found_address = []
+    address_list = []
+    total_labels = 0
+    listToSearch = ['ZipCode', 'StateName', 'PlaceName', 'StreetName']
+    parsedAddress = usaddress.parse(data)
+    for sublist in parsedAddress:
+        address_list.append(sublist[1])
+    address_list = list(set(address_list))
+    for label in address_list:
+        if label in listToSearch:
+            total_labels += 1
+    if total_labels == 4:
+        for sublist in parsedAddress:
+            if sublist[1] in listToSearch and sublist[1] not in covered_entity:
+                if sublist[1] == 'ZipCode':
+                    try:
+                        if not zipcodes.is_real(sublist[0]):
+                            continue
+                        else:
+                            zipflag = 1
+                    except:
+                        continue
+                covered_entity.append(sublist[1])
+                finalList.append(sublist[0])
+    if zipflag:
+        found_address = " ".join(finalList)
+    found_dates = regexParser.dates(found_address)
+    if len(found_dates) >= 1:
+        for j in found_dates:
+            r = found_address.replace(j, '')
+            normalized_found_address = "".join(r)
+    else:
+        normalized_found_address = found_address
+    if (normalized_found_address):
+        return normalized_found_address
+
+
+def udd_ssn_exclude_tag(found_ssn, data):
+    exclusion_tags_list = ['account number', 'account number.', 'account was', 'account is', 'acc', 'acc.#:',
+                           'account #', 'loan number', 'account', 'account no', 'routing number', 'routing numbers',
+                           'routing', 'routing no', 'call me on', 'call me', 'mob', 'office', 'ring', 'tel',
+                           'call this', 'routing number ach', 'passport', 'passport number', 'invoice', 'loan # is',
+                           'loan # was', 'cell', 'phone', 'phone number', 'phone numbers', 'zip']  #excluded 'tax id' from exclusion_tags_list
+    exclude_ssn_list = []
+    for tag in exclusion_tags_list:
+        test_regex = '(^|\s|\-|\*|\#)+?(' + tag + ')(\s+is\s|\s+as\s|\s+be\s|\s+was\s|\s*[\:\-\#\@]|\s*[\:\-\#\@][:]|\s*[\:\-\#\@][:]\s|\s*[\:\-\#\@]\s|\s)(\+\d{1,4}\s\d{9}|\+\d{1,4}\-\d{9}|\+\d{9}|\d{9}|\s\d{9}|\d{3}\-\d{2}\-\d{4})'
+        match_line = re.search(test_regex, data.lower())
+        if match_line:
+            line_match = match_line.group()
+            match_digit = re.search('(\d{3}\.\d{2}\.\d{4}|\d{3}\-\d{2}\-\d{4}|\d{3} \d{2} \d{4}|\d{9})', line_match)
+            if match_digit:
+                digit_match = match_digit.group()
+                exclude_ssn_list.append(digit_match)
+
+        test_regex_ph = '(\+\d{1,4}|\(\+\d{1,4}\)|\(\d{1,4}\)|\d{2,4}\s)(\s\d{9}|\d{9}|\-\d{9}|\s\-\d{9}|\s\-\s\d{9}|\-\s\d{9}|\s\d{3}\-\d{2}\-\d{4}|\d{3} \d{2} \d{4}|\d{8})'
+        match_line_ph = re.search(test_regex_ph, data.lower())
+        if match_line_ph:
+            line_match_ph = match_line_ph.group()
+            match_digit_ph = re.search('(\d{3}\.\d{2}\.\d{4}|\d{3}\-\d{2}\-\d{4}|\d{3} \d{2} \d{4}|\d{9})',
+                                       line_match_ph)
+            if match_digit_ph:
+                digit_match_ph = match_digit_ph.group()
+                exclude_ssn_list.append(digit_match_ph)
+        exclude_ssn_list = list(set(exclude_ssn_list))
+
+    if len(exclude_ssn_list) >= 1:
+        for exclude_value in exclude_ssn_list:
+            if exclude_value in found_ssn:
+                found_ssn.remove(exclude_value)
+    return found_ssn
+
+
+def udd_ssn_exclude(found_ssns_list):
+    filtered_ssns = []
+    custom_ssn_tin_ein_itin_exclusion_list = "123456789".split(',')
+    for ssn in found_ssns_list:
+        numeric_list = [i for i in ssn if i.isnumeric()]
+        numeric_string = ''.join(numeric_list)
+        if numeric_string.startswith('000') or numeric_string.startswith('666') or numeric_string[3:5] == '00' or numeric_string[-1:-5:-1] == '0000':
+            continue
+        elif numeric_string in custom_ssn_tin_ein_itin_exclusion_list:
+            continue
+        filtered_ssns.append(ssn)
+    return filtered_ssns
+
+
+def validate_ssn(identifier, ssns_with_spans, data):
+    if (ssns_with_spans[0][0].startswith('9') and identifier == 'SSN'):
+        return False
+    found_ssn = []
+    found_ssn = udd_are_non_numerically_enclosed(ssns_with_spans, data)
+    found_ssn = udd_ssn_exclude_tag(found_ssn, data)
+    found_ssn = udd_ssn_exclude(found_ssn)
+    if found_ssn:
+        return True
+
+def validate_password(tags_with_index, data):
+    found_passwords=[]
+    password_exclusion_list = exclusion_list + ['reset', 'coming', 'incorrect', 'wrong', 'changed', 'change',
+                                                'modified',
+                                                'updated', 'valid', 'invalid', 'set']
+    index = tags_with_index[0][1][0]
+    data = data.replace("\n", "")
+    value_string = data[index:index + 45].replace('.', ' ').replace(',', ' ').replace('?', ' ').replace(';', ' ')
+
+    pretext=[]
+    postext=[]
+    text=[]
+
+    flag=0
+    flag1=0
+    for value in value_string.split('.')[0].split(',')[0].split('?')[0].split(' '):
+        cleaned_value = value.replace('"', '').replace('\'', '')
+        pwd_valid_regex = "^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@!#$%^&])[A-Za-z\d@!#$%^&]{6,23}$"
+        valid = bool(re.match(pwd_valid_regex, cleaned_value))
+        cleaned_value = cleaned_value.encode('ascii', 'ignore')
+        if (len(cleaned_value) != 0) and (cleaned_value not in password_exclusion_list) :
+                if valid and cleaned_value.lower() not in password_exclusion_list:
+                    if flag == 1:
+                        postext.append(value)
+                        flag1 = 1
+                    else:
+                        text.append(value)
+                        flag = 1
+                        continue
+                if flag == 0:
+                        pretext.append(value)
+                if flag == 1 and flag1 == 0:
+                        postext.append(value)
+
+
+
+    if text:
+        found_passwords.append(" ".join(pretext))
+        found_passwords.append(" ".join(text))
+        found_passwords.append(" ".join(postext))
+
+        return found_passwords
+
+def find_sec_ques(data):
+    row = []
+    pretext=""
+    postext=""
+    found_ques = []
+    sec_ques_tregex="(^|\\s)+?(security question)(.{10,200}[\\:\\-\\?]\\s?(answer(\\s|\\s?\\-|\\s?\\:)?)?)"
+    sec_ques_tags ="sec_ques_tags=reset,what,who,where,question,challenge question,challenge questions,password reset, reset response".split(",")
+    sec_phrases="dog's name,best friend,cat name,dog name,cat's name,maiden name,dob,date of birth,birthday," \
+                "celebrity,house number and street name,last name of your third grade teacher,your father,name of your first boyfriend,name of your first girlfriend,favorite niece/nephew,first babysitter,best friend's first name,meet your spouse/significant,city did you honeymoon,last name of your family physician,best friend in high school live,favorite restaurant" \
+                ",first name of your high school,favorite person in history,name of your high " \
+                "school's star athlete,first pet name,first name of your".split(",")
+    for tag in sec_ques_tags:
+        sec_ques_tregex = sec_ques_tregex.replace(')(','|'+tag+')(')
+
+    flag=0
+    tags_with_index = [(i.group(), i.span()) for i in re.finditer(sec_ques_tregex, data.lower())]
+
+    if(tags_with_index):
+        tag = tags_with_index[0][0]
+        if not [i for i in sec_phrases if i in tag]:
+            return False
+        index = tags_with_index[0][1][0]
+        answer_index = data.lower().find('answer')
+        if (answer_index>-1):
+
+            value_string = data[index:answer_index + 20]
+            postext = data[answer_index + 20:answer_index+35]
+            pretext=data[0:index]
+
+            found_ques.append(value_string)
+
+        else:
+            for i in range(0,len(data)):
+                if data[i]=='?':
+                    flag=i
+            if not (flag):
+                value_string = data[index:index + 30]
+                postext = data[index + 30:]
+            else:
+                value_string=data[index:flag+1]
+                postext = data[flag + 30:]
+            pretext=data[0:index]
+
+            final_value = value_string.split('.')[0].replace('"', '')
+            if len(final_value) > 2:
+                found_ques.append(final_value)
+
+    if found_ques:
+        return [" ".join(found_ques),pretext,postext]
+
+
+def validate_cvv(pattern,data):
+    exc_datecc = "(([0-3][0-9] |[1-9])\\D{0,3})?\\b(?:jan(?:uary)? | feb(?:ruary)? | mar(?:ch)? | apr(?:il)? | may | jun(?:e)? | jul(?:y)? | aug(?:ust)? | sep(?:tember)? | oct(?:ober)? | (nov | dec)(?:ember)?)\\D?(([0 - 3][0 - 9] | [1 - 9])(st | nd | rd | th)?)?(\\D *)?((19[7 - 9]\\d | 20\\d{2}) |\\d{2})"
+    exc_date = "((\\d\\D\\d\\d) | (\\d\\d\\D\\d) | (\\d{3}((?!)\\D)\\d{1}) | (\\d{2}((?!)\\D)\\d{2}) | (\\d{1}((?!)\\D)\\d{3}) | (\\d\\D\\d\\D\\d\\d))"
+    exc_money = "(\\$[\\d\\W]*)"
+    exc_date1 = "(((([1-9]|[0-2][0-9]|[3][0-1])([-]|[.]|[/]|[\\]|[ ])([Jj][aA][nN]|[fF][eE][bB]|[mM][aA][rR]|[aA][pP][rR]|[mM][aA][yY]|[jJ][uU][nN]|[jJ][uU][lL]|[aA][uU][gG]|[sS][Ee][pP]|[oO][cC][tT]|[nN][oO][vV]|[dD][eE][cC])([-]|[.]|[\\/]|[\\]|[ ])\\d{2,4}))|(([1-9]|[0-2][0-9]|(3)[0-1])([-]|[.]|[/]|[\\]|[ ])(((0)[0-9])|((1)[0-2]))([-]|[.]|[/]|[\\]|[ ])\\d{2,4})|((((0)[0-9])|((1)[0-2]))([-]|[.]|[/]|[\\]|[ ])([1-9]|[0-2][0-9]|(3)[0-1])([-]|[.]|[/]|[\\]|[ ])\\d{2,4}))|(((([1-9]|[0-2][0-9]|[3][0-1])([-]|[.]|[/]|[\\]|[ ])([Jj][aA][nN][uU][aA][rR][yY]|[fF][eE][bB][rR][uR][aA][rR][yY]|[mM][aA][rR][cC][hH]|[aA][pP][rR][iI][lL]|[mM][aA][yY]|[jJ][uU][nN][eE]|[jJ][uU][lL][yY]|[aA][uU][gG][uU][sS][tT]|[sS][Ee][pP][tT][eE][mM][bB][eE][rR]|[oO][cC][tT][oO][bB][eE][rR]|[nN][oO][vV][eE][mM][bB][eE][rR]|[dD][eE][cC][eE][mM][bB][eE][rR])([-]|[.]|[/]|[\\]|[ ])\\d{2,4}))|(([1-9]|[0-2][0-9]|(3)[0-1])([-]|[.]|[/]|[\\]|[ ])(((0)[0-9])|((1)[0-2]))([-]|[.]|[/]|[\\]|[ ])\\d{2,4})|((((0)[0-9])|((1)[0-2]))([-]|[.]|[/]|[\\]|[ ])([1-9]|[0-2][0-9]|(3)[0-1])([-]|[.]|[/]|[\\]|[ ])\\d{2,4}))|(0[1-9]|1[0-2])/([0-9]{4}|[0-9]{2})|((([Jj][aA][nN][uU][aA][rR][yY]|[fF][eE][bB][rR][uR][aA][rR][yY]|[mM][aA][rR][cC][hH]|[aA][pP][rR][iI][lL]|[mM][aA][yY]|[jJ][uU][nN][eE]|[jJ][uU][lL][yY]|[aA][uU][gG][uU][sS][tT]|[sS][Ee][pP][tT][eE][mM][bB][eE][rR]|[oO][cC][tT][oO][bB][eE][rR]|[nN][oO][vV][eE][mM][bB][eE][rR]|[dD][eE][cC][eE][mM][bB][eE][rR])|([Jj][aA][nN]|[fF][eE][bB]|[mM][aA][rR]|[aA][pP][rR]|[mM][aA][yY]|[jJ][uU][nN]|[jJ][uU][lL]|[aA][uU][gG]|[sS][Ee][pP]|[oO][cC][tT]|[nN][oO][vV]|[dD][eE][cC]))(\\s{0,2})|([-]|[/]|[[\\\])([0-9]{4}|[0-9]{2})(\\D{0,2}))"
+
+
+    cvv_regex_tag = "(((cvv)|(c v v)|(cvvnumber)|(cvv number)|(cav)|(c a v)|(cid)|(c i d)|(csc)|(c s c)|(cvc)|(c v c)|(cvd)|(c v d)|(cve)|(c v e)|(cvn)|(c v n)|(cardauthenticationvalue)|(card authentication value)|(cardidentificationnumber)|(card identification number)|(cardid)|(card id)|(cardidentificationcode)|(card validation code)|(card identification code)|(cardsecuritycode)|(card security code)|(cardvalidationcode)|(card validation code)|(cardverificationdata)|(card verification data)|(eloverificationcode)|(elo verification code)|(cardvalidationnumber)|(cardverificationvalue)|(card verification value)|(securitycode)|(security code)|(validationcode)|(validation code)|(verificationno)|(verification no)|(verificationnumber)|(verification number)|(authenticationvalue)|(authentication value)|(identificationcode)|(identification code)|(verification data)|(validation number)|(validationnumber)|(verificationvalue)|(verification value)|(cvvi)|(c v v i)|(card validation code)|(cardvalidationcode)|(card validation number)|(back number)|(backnumber)|(sc)))"
+    exc_cc = "(\\b\\d{4} \\d{4} \\d{4} \\d{4}\\b)"
+    data = re.sub("\W(" + cvv_regex_tag + ")\W" + "|" + "(\W(" + cvv_regex_tag + ")(?!\w))" + "|" + "((?!\w)(" + cvv_regex_tag + ")\W)",
+                       ' cvv ', data)
+    data = re.sub(exc_date1,'', data)
+    data = re.sub(exc_money + '|' + exc_datecc + '|' + exc_date + '|' + exc_cc, '', data)
+    data = re.sub('((?![\s|\n])\W|_)', '', data)
+    found_cvvs=""
+    pre_text=""
+    post_text=""
+    tot_cvv=""
+    flag=0
+    delim=', '
+    data_with_index = [(i.group(), i.span()) for i in re.finditer(pattern, data.lower())]
+    data_len = len(data_with_index)
+    if(data_with_index):
+        for i in range(data_len):
+            for x in data_with_index[i][0] :
+                if not x.isdigit() and flag==0:
+                    pre_text+=x
+                if x is not None and x.isdigit():
+                    flag=1
+                    found_cvvs+=x
+            if(len(found_cvvs) <= 4):
+                tot_cvv += (found_cvvs + delim)
+                found_cvvs=""
+
+        post_text=data[data_with_index[i-1][1][1]:data_with_index[i-1][1][1]+15]
+        tot_cvv= tot_cvv.rstrip(', ')
+    if(tot_cvv):
+        return [tot_cvv,pre_text,post_text]
+
+
+def get_cvv_pattern():
+    cvv_com = "((\\b(regext)\\b)(((?!\\d{3,4})\\w|\\s)*?(\\b\\d{3,4}\\b)))|(\\b(regext))(\\d{3,4}\\b)"
+    cvv_lef = "((\\b\\d{3,4}\\b)(((?!\\d{3,4})\\w|\\s)*?(\\b(regext)\\b)((?![ |\\w]*\\b\\d{3,4}\\b))))|(\\b\\d{3,4})((regext)\\b)"
+    cvv_or = "((\\b(regext)\\b\\s)(is|are|were|was|\\W|\\s|be|as|may|might|can)*((\\b\\d{3,4}\\b)(\\s(or|and)\\s)(\\b\\d{3,4}\\b))(((\\s(or|and)\\s)(\\b\\d{3,4}\\b))?))"
+    cvv_regex_tag = "(((cvv)|(c v v)|(cvvnumber)|(cvv number)|(cav)|(c a v)|(cid)|(c i d)|(csc)|(c s c)|(cvc)|(c v c)|(cvd)|(c v d)|(cve)|(c v e)|(cvn)|(c v n)|(cardauthenticationvalue)|(card authentication value)|(cardidentificationnumber)|(card identification number)|(cardid)|(card id)|(cardidentificationcode)|(card validation code)|(card identification code)|(cardsecuritycode)|(card security code)|(cardvalidationcode)|(card validation code)|(cardverificationdata)|(card verification data)|(eloverificationcode)|(elo verification code)|(cardvalidationnumber)|(cardverificationvalue)|(card verification value)|(securitycode)|(security code)|(validationcode)|(validation code)|(verificationno)|(verification no)|(verificationnumber)|(verification number)|(authenticationvalue)|(authentication value)|(identificationcode)|(identification code)|(verification data)|(validation number)|(validationnumber)|(verificationvalue)|(verification value)|(cvvi)|(c v v i)|(card validation code)|(cardvalidationcode)|(card validation number)|(back number)|(backnumber)|(sc)(.*)))"
+    cvv_com = cvv_com.replace("regext", cvv_regex_tag)
+    cvv_lef = cvv_lef.replace("regext", cvv_regex_tag)
+    cvv_or = cvv_or.replace("regext", cvv_regex_tag)
+    return cvv_com+"|"+cvv_lef+"|"+cvv_or
+
+def validate_idpasswordcombo(data):
+    user_pattern = "(((^|\s)+?(userid)([\s\,\.\:\-\#]))|(userid)|(username)|(credentials are)|(credentials)|(user id)|(user)|(admin)|(account id)|(accountid)|(loginid)|(login id)|(signin)|(sign in)|(logon)|(login)|(logonid)|(logon_id)|(sign_in)(.*?)).{,0}\s?(?P<sf_data>(.*?))"
+    paswd_pattern = "((((pw)|(pwd)|(pass word)|(password)|(passwrd)|(security_key)|(securitykey)|(passcode)|(psdwd)|(pswd)|(contraseÃ„)|(Ã‚Â±a))(\\s|[:]|(.*[:])(.*?)))).{,0}\\s?(?P<sf_data>(.*?))"
+    user_range = []
+    pwd_range = []
+    regexu = re.compile(user_pattern, flags=re.IGNORECASE)
+    regexp = re.compile(paswd_pattern, flags=re.IGNORECASE)
+
+    for i in regexu.finditer(data):
+        matched = (i.start('sf_data'), i.end('sf_data'))
+        user_range.append(matched)
+
+    for i in regexp.finditer(data):
+        matched = (i.start('sf_data'), i.end('sf_data'))
+        pwd_range.append(matched)
+    return(user_range, pwd_range)
+
+
+
+
+
+
+the above on is entity_validation.py
+
+
+#  Copyright © 2020 Infosys Limited, Bangalore, India. All rights reserved.
+#  Version: 1.0
+#
+#  Except for any open source software components embedded in this Infosys proprietary software program (“Program”),
+#  this Program is protected by copyright laws, international treaties and other pending or existing intellectual
+#  property rights in India, the United States and other countries.Except as expressly permitted, any unauthorized
+#  reproduction, storage, transmission in any form or by any means (including without limitation electronic, mechanical,
+#  printing, photocopying, recording or otherwise), or any distribution of this Program, or any portion of it, may
+#  result in severe civil and criminal penalties, and will be prosecuted to the maximum extent possible under the law.
+#
+#
+#  Created by - javed.hussain at May 28, 2020
+import ctypes
+import hashlib
+import json
+import logging
+import os
+import shutil
+import sys
+import time
+import traceback
+import zipfile
+from datetime import datetime
+
+from com.infosys.udd.misc.properties import configs
+
+
+def list_to_json(objects_list):
+    dict_list = []
+    for ent in objects_list:
+        dict_list.append(object_to_json(ent))
+    return json.dumps(dict_list, indent=4)
+
+
+def object_to_json(ob, return_type='dict'):
+    object_dict = ob.__dict__.copy()
+    for k, v in ob.__dict__.items():
+        if k.startswith('_'):
+            object_dict.pop(k)
+        if isinstance(v, datetime):
+            object_dict[k] = v.strftime('%d-%B-%Y, %H:%M:%S.%f')
+    return object_dict if return_type == 'dict' else json.dumps(object_dict, indent=4)
+
+
+def dict_to_json(data):
+    return json.dumps(data, indent=4)
+
+
+def get_path_parts(file_path: str):
+    pf = file_path.rsplit('\\', maxsplit=1)
+    parent = ''
+    if len(pf) == 1:
+        file = pf[0]
+    else:
+        parent, file = pf
+    file_ext = file.rsplit('.', maxsplit=1)
+    if len(file_ext) == 2:
+        filename = file_ext[0]
+        ext = file_ext[1]
+    else:
+        filename = file_ext[0]
+        ext = ''
+    return parent, filename, ext
+
+
+def compress(file_path, directory_path):
+    with zipfile.ZipFile(file_path, 'w', compression=zipfile.ZIP_DEFLATED) as zip_file:
+        # writing each file one by one
+        for file in get_all_file_paths(directory_path):
+            zip_file.write(file, arcname=file.replace(directory_path, ''))
+
+
+def get_all_file_paths(directory):
+    file_paths = []
+    for root, directories, files in os.walk(directory):
+        for filename in files:
+            file_path = os.path.join(root, filename)
+            file_paths.append(file_path)
+    # print(file_paths)
+    return file_paths
+
+
+def log_error(class_name, method_name, error: Exception):
+    logging.error(f"Exception occurred in '{class_name}'.'{method_name}' : {error}")
+    print(traceback.format_exception(None, error, error.__traceback__), file=sys.stderr, flush=True)
+
+
+def create_sp_temp() -> str:
+    hash_code = hashlib.sha1(str(time.time()).encode('utf-8')).hexdigest()
+    temp_path = os.path.join(configs.get('SP_TEMP').data, "." + hash_code)
+    if not os.path.exists(temp_path):
+        os.makedirs(temp_path)
+        if os.name == 'nt':
+            ctypes.windll.kernel32.SetFileAttributesW(temp_path, 2)
+    logging.debug(f"Create temp path : {temp_path}")
+    return temp_path
+
+
+def make_path(path, is_file=True):
+    p = os.path.abspath(path)
+    p_dir = os.path.dirname(p) if is_file else p
+    if not os.path.exists(p_dir):
+        os.makedirs(p_dir)
+        logging.debug(f"Created path : {p_dir}")
+    return p
+
+
+def clear_sp_path(directory_path, remove_root=True):
+    if os.path.exists(directory_path):
+        folder = directory_path
+        for filename in os.listdir(folder):
+            file_path = os.path.join(folder, filename)
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path)
+    if remove_root:
+        shutil.rmtree(directory_path)
+    logging.debug(f"Cleared temp path : {directory_path}")
+
+the above one is utils.py
+
+
+#  Copyright © 2020 Infosys Limited, Bangalore, India. All rights reserved.
+#  Version: 0.0.1
+#
+#  Except for any open source software components embedded in this Infosys proprietary software program (“Program”),
+#  this Program is protected by copyright laws, international treaties and other pending or existing intellectual
+#  property rights in India, the United States and other countries.Except as expressly permitted, any unauthorized
+#  reproduction, storage, transmission in any form or by any means (including without limitation electronic, mechanical,
+#  printing, photocopying, recording or otherwise), or any distribution of this Program, or any portion of it, may
+#  result in severe civil and criminal penalties, and will be prosecuted to the maximum extent possible under the law.
+#
+#
+#  Created by - javed.hussain at Apr 17, 2020
+import copy
+import json
+import os
+
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, CheckConstraint, Boolean, Text, TypeDecorator
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import scoped_session, sessionmaker, relationship
+
+from com.infosys.udd.misc.properties import UDD_LIB_PATH
+from com.infosys.udd.models.dto_models import MaskingSensitiveField
+
+
+database_path = os.path.abspath(os.path.join(UDD_LIB_PATH, 'runtime', 'iedps_udd.db'))
+engine = create_engine('sqlite:///' + database_path + "?check_same_thread=False")
+Session = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=engine))
+
+# Base class for flask models
+Base = declarative_base()
+Base.query = Session.query_property()
+
+
+class JSON(TypeDecorator):
+
+    @property
+    def python_type(self):
+        return object
+
+    impl = Text
+
+    def process_bind_param(self, value, dialect):
+        return json.dumps(value)
+
+    def process_literal_param(self, value, dialect):
+        return value
+
+    def process_result_value(self, value, dialect):
+        try:
+            return json.loads(value)
+        except (ValueError, TypeError):
+            return None
+
+
+class Processes(Base):
+    __tablename__ = 'PROCESSES'
+
+    pid = Column(Integer, primary_key=True, autoincrement=True)
+    os_pid = Column(Integer)
+    directory_path = Column(String(10000), nullable=False)
+    total_documents_to_be_processed = Column(Integer, nullable=False)
+    documents_processed = Column(Integer, nullable=False)
+    config_id = Column(Integer, ForeignKey('CONFIGURATIONS.configuration_id'))
+    status = Column(String(50),
+                    CheckConstraint("STATUS IN ('NOT_STARTED', 'RUNNING', 'PAUSED', 'COMPLETED', 'FAILED')"),
+                    nullable=False)
+    scan_type =  Column(String(50),
+                    CheckConstraint("SCAN_TYPE IN ('Quick_scan', 'Full_scan')"),
+                    nullable=False)
+    # ner_pref = Column(String(50),
+    #                   CheckConstraint("NER_PREF IN ('without_transformer', 'with_transformer')"),
+    #                   nullable=False)
+
+    is_archived = Column(Boolean, default=False, nullable=False)
+    updated_timestamp = Column(DateTime(), default="datetime('now','localtime')")
+    start_time = Column(DateTime(), default="datetime('now','localtime')")
+    completed_time = Column(DateTime(), nullable=True)
+  
+    execution_mode = Column(String(50),
+                            CheckConstraint("EXECUTION_MODE IN ('DISCOVERY','MASKING','MASKING_PREVIEW', 'TAGGING')"),
+                            nullable=False)
+
+# ,ner_pref
+    def __init__(self, directory_path, total_documents_to_be_processed, documents_processed, config_id,
+                 
+                 updated_timestamp, start_time, execution_mode, scan_type,is_archived=False,
+                 status='NOT_STARTED', os_pid=None, completed_time=None):
+        self.directory_path = directory_path
+        self.total_documents_to_be_processed = total_documents_to_be_processed
+        self.documents_processed = documents_processed
+        self.is_archived = is_archived
+        self.updated_timestamp = updated_timestamp
+        self.status = status
+        self.os_pid = os_pid
+        self.start_time = start_time
+        self.scan_type=scan_type
+        # self.ner_pref=ner_pref
+        self.completed_time = completed_time
+        self.config_id = config_id
+        self.execution_mode = execution_mode
+
+    def __repr__(self):
+        return '<PID : %r, Directory : %r, Status : %r>' % (self.pid, self.directory_path, self.status)
+
+
+class SensitiveField(Base):
+    __tablename__ = 'DISCOVERED_DATA'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    pid = Column(Integer, ForeignKey('PROCESSES.pid'))
+    document_path = Column(String(10000), nullable=False)
+    document_type = Column(String(20), nullable=False)
+    segment = Column(String(10000), nullable=False)
+    sub_segment = Column(String(10000), nullable=True)
+    entity_name = Column(String(255), nullable=False)
+    text = Column(String(10000), nullable=False)
+    pre_text = Column(String(50), nullable=False, default='')
+    post_text = Column(String(50), nullable=False, default='')
+    line_number = Column(Integer, nullable=True, default='')
+    page_number = Column(Integer, nullable=True, default='')
+
+    def __init__(self, pid, document_path, document_type, entity_name, text, pre_text, post_text,
+                 segment, sub_segment, line_number, page_number ):
+        self.pid = pid
+        self.document_path = document_path
+        self.document_type = document_type
+        self.segment = segment
+        self.sub_segment = sub_segment
+        self.entity_name = entity_name
+        self.text = text
+        self.pre_text = pre_text
+        self.post_text = post_text
+        self.line_number = line_number
+        self.page_number = page_number
+
+    def __repr__(self):
+        return '<Document : %r, data : %r, entity : %r>' % (
+            self.document_path, self.pre_text + ' ' + self.text + ' ' + self.post_text, self.entity_name)
+
+    def to_msf(self):
+        msf = MaskingSensitiveField()
+        msf.entity_name = self.entity_name
+        msf.pre_text = self.pre_text
+        msf.post_text = self.post_text
+        msf.original_text = self.text
+        msf.masked_text = None
+        msf.segment = self.segment
+        msf.sub_segment = self.sub_segment
+        msf.document_path = self.document_path
+        msf.document_type = self.document_type
+        msf.id = self.id
+        msf.pid = self.pid
+        return msf
+
+
+class Configuration(Base):
+    __tablename__ = 'CONFIGURATIONS'
+
+    configuration_id = Column(Integer, primary_key=True, autoincrement=True)
+    configuration_name = Column(String(50), unique=True)
+    entities = relationship("ConfigurationEntities", backref='parent', cascade="all,delete")
+    # entities_list = Column(JSON, nullable=False)
+    open_compressed_file = Column(Boolean, nullable=False, default=False)
+    force_text_read = Column(Boolean, nullable=False, default=False)
+    file_encoding = Column(String(10), nullable=False, default='UTF-8')
+
+    def __init__(self, configuration_name, open_compressed_file=False, force_text_read=False, file_encoding='UTF-8'):
+        self.configuration_name = configuration_name
+        # self.entities_list = entities_list
+        self.open_compressed_file = open_compressed_file
+        self.force_text_read = force_text_read
+        self.file_encoding = file_encoding
+
+    def __repr__(self):
+        return '<Configuration : %r, Entities : %r>' % (
+            self.configuration_name, self.entities)
+
+    def copy(self):
+        new = Configuration
+        new.configuration_id = self.configuration_id
+        new.configuration_name = self.configuration_name
+        new.open_compressed_file = self.open_compressed_file
+        new.force_text_read = self.force_text_read
+        new.file_encoding = self.file_encoding
+        new.entities = []
+        for ent in self.entities:
+            new.entities.append(ent.entity.copy())
+        return new
+
+
+class Entity(Base):
+    __tablename__ = 'ENTITIES'
+
+    entity_id = Column(Integer, primary_key=True, autoincrement=True)
+    entity_identifier = Column(String(50), unique=True)
+    entity_type = Column(String(20), CheckConstraint("ENTITY_TYPE IN ('NAMED', 'CONTEXT', 'MATCHED')"), nullable=False)
+    entity_args = Column(JSON, nullable=True)
+    entity_tags = Column(JSON, nullable=True, default="COMMON")
+    entity_description = Column(String(500), nullable=True)
+
+    def __init__(self, entity_identifier, entity_type, entity_args, entity_tags=None, entity_description=None):
+        self.entity_identifier = entity_identifier
+        self.entity_args = entity_args
+        self.entity_type = entity_type
+        self.entity_tags = entity_tags
+        self.entity_description = entity_description
+
+    def __repr__(self):
+        return '<Entity : %r, Type : %r, Tags : %r>' % (self.entity_identifier, self.entity_type, self.entity_tags)
+
+    def copy(self):
+        return copy.deepcopy(self)
+
+
+class ConfigurationEntities(Base):
+    __tablename__ = 'CONFIG_ENTITIES'
+
+    configuration_id = Column(Integer, ForeignKey('CONFIGURATIONS.configuration_id', ondelete='CASCADE'),
+                              primary_key=True)
+    entity_id = Column(Integer, ForeignKey('ENTITIES.entity_id', ondelete='CASCADE'), primary_key=True, )
+    entity = relationship('Entity')
+    config = relationship('Configuration')
+
+    def __init__(self, config_id, entity_id):
+        self.configuration_id = config_id
+        self.entity_id = entity_id
+
+    def __repr__(self):
+        return '<Configuration : %r, Entity : %r>' % (
+            self.configuration_id, self.entity_id)
+
+the above one is dbo_models.py
+
+#  Copyright © 2020 Infosys Limited, Bangalore, India. All rights reserved.
+#  Version: 1.0
+#
+#  Except for any open source software components embedded in this Infosys proprietary software program (“Program”),
+#  this Program is protected by copyright laws, international treaties and other pending or existing intellectual
+#  property rights in India, the United States and other countries.Except as expressly permitted, any unauthorized
+#  reproduction, storage, transmission in any form or by any means (including without limitation electronic, mechanical,
+#  printing, photocopying, recording or otherwise), or any distribution of this Program, or any portion of it, may
+#  result in severe civil and criminal penalties, and will be prosecuted to the maximum extent possible under the law.
+#
+#
+#  Created by - javed.hussain at Sep 02, 2020
+from typing import List
+
+from com.infosys.udd.misc import utils
+
+
+class MaskingSensitiveField:
+
+    def __init__(self):
+        self.entity_name = None
+        self.pre_text = None
+        self.post_text = None
+        self.original_text = None
+        self.masked_text = None
+        self.segment = None
+        self.sub_segment = None
+        self.document_path = None
+        self.document_type = None
+        self.id = None
+        self.pid = None
+
+    @staticmethod
+    def bulk_transform(data: List):
+        results = []
+        for sf in data:
+            results.append(utils.object_to_json(sf.to_msf()))
+        return results
+the above one is dto_models.py
+
+
+#  Copyright © 2020 Infosys Limited, Bangalore, India. All rights reserved.
+#  Version: 1.0
+#
+#  Except for any open source software components embedded in this Infosys proprietary software program (“Program”),
+#  this Program is protected by copyright laws, international treaties and other pending or existing intellectual
+#  property rights in India, the United States and other countries.Except as expressly permitted, any unauthorized
+#  reproduction, storage, transmission in any form or by any means (including without limitation electronic, mechanical,
+#  printing, photocopying, recording or otherwise), or any distribution of this Program, or any portion of it, may
+#  result in severe civil and criminal penalties, and will be prosecuted to the maximum extent possible under the law.
+#
+#
+#  Created by - javed.hussain at Sep 14, 2020
+
+import logging
+from abc import ABCMeta, abstractmethod, ABC
+from concurrent.futures.thread import ThreadPoolExecutor
+from enum import Enum
+from queue import Queue
+from threading import Thread
+
+from com.infosys.udd.pipeline.pipeline_utils import PipelineException
+
+
+class Context:
+    def __init__(self):
+        self.__dict = dict()
+
+    def put_data(self, key: str, value):
+        self.__dict[key] = value
+
+    def get_data(self, key: str):
+        return self.__dict[key]
+
+
+class Pipe(metaclass=ABCMeta):
+
+    def __init__(self, workers=None):
+        self.__worker = workers
+        # noinspection PyTypeChecker
+        self.__context: Context = None
+        self.__next_pipe = None
+        self.__pipe_status = PipeStatus.IDLE
+
+    def set_context(self, context: Context):
+        self.__context = context
+
+    def get_context_data(self, key):
+        return self.__context.get_data(key)
+
+    def set_context_data(self, key, value):
+        return self.__context.put_data(key, value)
+
+    def attach(self, next_pipe):
+        if self.__next_pipe is not None:
+            self.__next_pipe.attach(next_pipe)
+        else:
+            self.__next_pipe = next_pipe
+
+    def get_status(self):
+        return self.__pipe_status
+
+    def set_status(self, status):
+        self.__pipe_status = status
+
+    # @abstractmethod
+    def dispose(self):
+        if self.get_status() >= PipeStatus.STOPPED:
+            self.set_status(PipeStatus.DISPOSED)
+        if self.__next_pipe is not None:
+            self.get_next_pipe().dispose()
+
+    def get_next_pipe(self):
+        return self.__next_pipe
+
+    def get_worker(self):
+        return self.__worker
+
+    def is_stopped(self):
+        return self.get_status() == PipeStatus.STOPPED
+
+    def stop(self):
+        self.set_status(PipeStatus.STOPPING)
+        while self.get_status() != PipeStatus.STOPPED:
+            pass
+        logging.debug(f"Pipe : {self.__class__.__name__} is stopped")
+
+    def is_completed(self):
+        return self.get_status() == PipeStatus.COMPLETED
+
+    def completed(self):
+        # logging.debug(f'Starting PIPE : {self.__class__.__name__}')
+        if self.get_status() < PipeStatus.STOPPING:
+            self.set_status(PipeStatus.COMPLETED if isinstance(self, InitialPipe) else PipeStatus.COMPLETING)
+            while self.get_status() != PipeStatus.COMPLETED:
+                pass
+        # else:
+        #     print(f'Invalid state in PIPE : {self.__class__.__name__} , STATUS : {self.get_status()}')
+        #     raise PipelineException(f'Invalid state in PIPE : {self.__class__.__name__} , STATUS : {self.get_status()}')
+        if self.__next_pipe is not None:
+            self.get_next_pipe().completed()
+        # logging.debug(f'Completed PIPE : {self.__class__.__name__}')
+
+
+class Pipeline:
+
+    def __init__(self, first_pipe=None, **kwargs):
+        self.__first_pipe = first_pipe
+        self.__args = kwargs
+        self.__context = Context()
+
+    def set_context_data(self, key, value):
+        self.__context.put_data(key, value)
+
+    def get_context_data(self, key):
+        return self.__context.get_data(key)
+
+    def add_pipe(self, next_pipe: Pipe):
+        if not isinstance(next_pipe, Pipe):
+            raise PipelineException(f"You can only attach Pipe instances in a pipeline. Found - {type(next_pipe)}")
+        next_pipe.set_context(self.__context)
+        if self.__first_pipe is None:
+            if isinstance(next_pipe, InitialPipe):
+                self.__first_pipe = next_pipe
+            else:
+                raise PipelineException(message="First pipe in pipeline should be an instance of InitialPipe.")
+        else:
+            self.__first_pipe.attach(next_pipe)
+        return self
+
+    def start(self):
+        x = self.__first_pipe.get_next_pipe()
+        while x is not None:
+            try:
+                x.start()
+            except Exception as e:
+                print("Error while starting pipe : ", x.__class__.__name__)
+            x = x.get_next_pipe()
+        self.__first_pipe.start()
+
+    def dispose(self):
+        self.__first_pipe.dispose()
+
+    def verify_pipeline(self):
+        pass
+
+    def get_results(self):
+        x = self.__first_pipe
+        while x.get_next_pipe() is not None:
+            x = x.get_next_pipe()
+        return x.get_results()
+
+    def represent(self):
+        x = self.__first_pipe
+        pipeline = ''
+        while x is not None:
+            pipeline += f'[{type(x).__name__}] ==> '
+            x = x.get_next_pipe()
+        logging.info(f'Pipeline - | {pipeline.rstrip("=> ")} |')
+
+    def is_completed(self):
+        x = self.__first_pipe
+        while x is not None:
+            print(f'{type(x).__name__} --> ', end='')
+            if x.get_status() not in [PipeStatus.STOPPED, PipeStatus.COMPLETED]:
+                return False
+            x = x.get_next_pipe()
+        return True
+
+
+class InitialPipe(Pipe, ABC):
+
+    @abstractmethod
+    def start(self):
+        pass
+
+    def attach(self, next_pipe):
+        if isinstance(next_pipe, InitialPipe):
+            raise PipelineException(message="Can't attach multiple InitialPipes in same pipeline.")
+        Pipe.attach(self, next_pipe)
+
+
+class MiddlePipe(Pipe, ABC, Thread):
+
+    def __init__(self, no_of_workers=1, queue_size=1):
+        Pipe.__init__(self, workers=ThreadPoolExecutor(max_workers=no_of_workers))
+        Thread.__init__(self)
+        self.max_queue_size = queue_size
+        self.__task_queue = Queue(maxsize=queue_size)
+
+    @abstractmethod
+    def process(self, data):
+        pass
+
+    def run(self) -> None:
+        logging.debug(f"Started PIPE : {self.__class__.__name__}.")
+        try:
+            self.set_status(PipeStatus.RUNNING)
+            # logging.debug(f"Started PIPE : {self.__class__.__name__}.")
+            while (self.get_status() < PipeStatus.STOPPING or not self.__task_queue.empty()) \
+                    and not self.get_context_data('has_error'):
+                if not self.__task_queue.empty():
+                    data = self.__task_queue.get(block=False)
+                    self.process(data)
+            with self.__task_queue.mutex:
+                self.__task_queue.queue.clear()
+            # logging.debug(f"Completed processing in {self.__class__.__name__}.")
+        except Exception as e:
+            logging.error(e, exc_info=True)
+            self.set_context_data('has_error', True)
+            self.set_context_data('error_message', e)
+        finally:
+            self.set_status(PipeStatus.STOPPED if self.get_status() == PipeStatus.STOPPING else PipeStatus.COMPLETED)
+            logging.debug(f"Completed PIPE : {self.__class__.__name__}.")
+
+    def submit(self, data):
+        while self.__task_queue.qsize() >= self.max_queue_size:
+            if self.get_context_data('has_error'):
+                raise Exception(self.get_context_data('error_message'))
+        self.__task_queue.put(data, block=False)
+
+    def attach(self, next_pipe):
+        if isinstance(next_pipe, InitialPipe):
+            raise PipelineException(message="Can't attach InitialPipe after MiddlePipe.")
+        Pipe.attach(self, next_pipe)
+
+
+class FinalPipe(MiddlePipe, ABC, Thread):
+
+    def __init__(self, no_of_workers=1, queue_size=1):
+        MiddlePipe.__init__(self, no_of_workers, queue_size=queue_size)
+        Thread.__init__(self)
+
+    def attach(self, next_pipe):
+        raise PipelineException(message="Can't attach any pipes after FinalPipe.")
+
+    @abstractmethod
+    def get_results(self):
+        pass
+
+
+class PipeStatus(Enum):
+    IDLE = 0
+    RUNNING = 1
+    STOPPING = 2
+    STOPPED = 3
+    COMPLETING = 4
+    COMPLETED = 5
+    DISPOSED = 6
+
+    def __lt__(self, other):
+        return self.value < other.value
+
+    def __le__(self, other):
+        return self.value <= other.value
+
+    def __gt__(self, other):
+        return self.value > other.value
+
+    def __ge__(self, other):
+        return self.value >= other.value
+
+    def __eq__(self, other):
+        return self.value == other.value
+
+the above one is pipeline.py
+
+--  Copyright   2020 Infosys Limited, Bangalore, India. All rights reserved.
+--  Version: 0.0.1
+
+--  Except for any open source software components embedded in this Infosys proprietary software program (?Program?),
+--  this Program is protected by copyright laws, international treaties and other pending or existing intellectual
+--  property rights in India, the United States and other countries.Except as expressly permitted, any unauthorized
+--  reproduction, storage, transmission in any form or by any means (including without limitation electronic, mechanical,
+--  printing, photocopying, recording or otherwise), or any distribution of this Program, or any portion of it, may
+--  result in severe civil and criminal penalties, and will be prosecuted to the maximum extent possible under the law.
+
+
+--  Created by - javed.hussain at Apr 17, 2020
+
+PRAGMA foreign_keys = off;
+PRAGMA journal_mode=WAL;
+BEGIN TRANSACTION;
+
+
+-- Trigger to update the timestamp
+DROP TRIGGER IF EXISTS Process_Updated;
+CREATE TRIGGER Process_Updated
+         AFTER UPDATE
+            ON PROCESSES
+      FOR EACH ROW
+BEGIN
+    UPDATE PROCESSES
+       SET UPDATED_TIMESTAMP = datetime('now', 'localtime')
+     WHERE PID = OLD.PID;
+END;
+
+-- Clean the database
+delete from entities;
+delete from configurations;
+delete from discovered_data;
+delete from processes;
+delete from config_entities;
+
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('PERSON','{"patterns" : ["PERSON"]}', 'NAMED','["NER","COMMON"]', 'People, including fictional.');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('NORP', '{"patterns" : ["NORP"]}', 'NAMED','["NER","COMMON"]', 'Nationalities or religious or political groups.');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('FAC', '{"patterns" : ["FAC"]}', 'NAMED','["NER","COMMON"]', 'Buildings, airports, highways, bridges, etc.');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('ORG', '{"patterns" : ["ORG"]}', 'NAMED','["NER","COMMON"]', 'Companies, agencies, institutions, etc.');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('GPE', '{"patterns" : ["GPE"]}', 'NAMED','["NER","COMMON"]', 'Countries, cities, states.');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('LOC', '{"patterns" : ["LOC"]}', 'NAMED','["NER","COMMON"]', 'Non-GPE locations, mountain ranges, bodies of water.');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('PRODUCT', '{"patterns" : ["PRODUCT"]}', 'NAMED','["NER","COMMON"]', 'Objects, vehicles, foods, etc. (Not services.)');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('EVENT', '{"patterns" : ["EVENT"]}', 'NAMED','["NER","COMMON"]', 'Named hurricanes, battles, wars, sports events, etc.');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('WORK_OF_ART', '{"patterns" : ["WORK_OF_ART"]}', 'NAMED','["NER","COMMON"]', 'Titles of books, songs, etc.');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('LAW', '{"patterns" : ["LAW"]}', 'NAMED','["NER","COMMON"]', 'Named documents made into laws.');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('LANGUAGE', '{"patterns" : ["LANGUAGE"]}', 'NAMED','["NER","COMMON"]', 'Any named language.');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('DATE', '{"patterns" : ["DATE"]}', 'NAMED','["NER","COMMON"]', 'Absolute or relative dates or periods.');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('TIME', '{"patterns" : ["TIME"]}', 'NAMED','["NER","COMMON"]', 'Times smaller than a day.');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('PERCENT', '{"patterns" : ["PERCENT"]}', 'NAMED','["NER","COMMON"]', 'Percentage, including  % .');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('MONEY', '{"patterns" : ["MONEY"]}', 'NAMED','["NER","COMMON"]', 'Monetary values, including unit.');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('QUANTITY', '{"patterns" : ["QUANTITY"]}', 'NAMED','["NER","COMMON"]', 'Measurements, as of weight or distance.');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('ORDINAL', '{"patterns" : ["ORDINAL"]}', 'NAMED','["NER","COMMON"]', ' first ,  second , etc.');
+insert into entities(entity_identifier, entity_args, entity_type, entity_tags, entity_description) values('CARDINAL', '{"patterns" : ["CARDINAL"]}', 'NAMED','["NER","COMMON"]', 'Numerals that do not fall under another type.');
+
+
+
+
+--
+--
+--
+
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('SSN', 'MATCHED', '["COMMON"]', '{"patterns" : ["(^(?!000|666)[0-8][0-9]{2}(-|.)(?!00)[0-9]{2}(-|.)(?!0000)[0-9]{4}$)|(\\d{3}\\.\\d{2}\\.\\d{4}|\\d{3}\\-\\d{2}\\-\\d{4}|\\d{3} \\d{2} \\d{4}|\\d{9})|(\\d{2}[\\-\\. ]\\d{7}|\\d{7}[\\-\\. ]\\d{2}|\\d{3}[\\-\\. ]\\d{6}|\\d{6}[\\-\\. ]\\d{3})" ] , "taggers" : ["(((ss)|(social security num)|(social security no)|(social security)|(vsoc sec)|(social sec)|(socsecno)|(socsecnum)|(refnum)|(security)|(ssn)|(^|\\s|\\-|\\*|\\#|\\()+?(s[\\.\\-]?s[\\.\\-]?n[\\.\\-]?)([\\s\\,\\.\\:\\-\\#]))(.*?))"]}' , 'Social Security number for connection with social security');
+--
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('VIN', 'MATCHED', '["COMMON"]', '{"patterns" : ["(^[A-HJ-NPR-Z0-9]{8}[\\dX][A-HJ-NPR-Z0-9]{2}y\\d{6}$)|([A-HJ-NPR-Z0-9]{8}[\\dX][A-HJ-NPR-Z0-9]{2}\\d{6})"] , "taggers" : ["(((vin)|(vehicle identification number)|(vehicle id number)|(vehicle identification no)|(VIN)|(vehicle id)|(vehicle_identification_number)|(vehichleid)|(vehichlenumber)|(vehichle_id)|(vehichle_number)|(vehicleid)|(vehiclenumber)|(vehicle_id)|(vehicle_number))(.*?))" ]}', 'Vehicle Identification Number');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('Date', 'MATCHED', '["COMMON"]', '{"patterns" : ["(((([1-9]|[0-2][0-9]|[3][0-1])([-]|[.]|[/]|[\\]|[ ])(([Jj][aA][nN])|[fF][eE][bB]|[mM][aA][rR]|[aA][pP][rR]|[mM][aA][yY]|[jJ][uU][nN]|[jJ][uU][lL]|[aA][uU][gG]|[sS][Ee][pP]|[oO][cC][tT]|[nN][oO][vV]|[dD][eE][cC])([-]|[.]|[/]|[\\]|[ ])\\d{2,4}))|(([1-9]|[0-2][0-9]|(3)[0-1])([-]|[.]|[/]|[\\]|[ ])(((0)[0-9])|((1)[0-2]))([-]|[.]|[/]|[\\]|[ ])\\d{2,4})|((((0)[0-9])|((1)[0-2]))([-]|[.]|[/]|[\\]|[ ])([1-9]|[0-2][0-9]|(3)[0-1])([-]|[.]|[/]|[\\]|[ ])\\d{2,4}))|(((([1-9]|[0-2][0-9]|[3][0-1])([-]|[.]|[/]|[\\]|[ ])([Jj][aA][nN][uU][aA][rR][yY]|[fF][eE][bB][rR][uR][aA][rR][yY]|[mM][aA][rR][cC][hH]|[aA][pP][rR][iI][lL]|[mM][aA][yY]|[jJ][uU][nN][eE]|[jJ][uU][lL][yY]|[aA][uU][gG][uU][sS][tT]|[sS][Ee][pP][tT][eE][mM][bB][eE][rR]|[oO][cC][tT][oO][bB][eE][rR]|[nN][oO][vV][eE][mM][bB][eE][rR]|[dD][eE][cC][eE][mM][bB][eE][rR])([-]|[.]|[/]|[\\]|[ ])\\d{2,4}))|(([1-9]|[0-2][0-9]|(3)[0-1])([-]|[.]|[/]|[\\]|[ ])(((0)[0-9])|((1)[0-2]))([-]|[.]|[/]|[\\]|[ ])\\d{2,4})|((((0)[0-9])|((1)[0-2]))([-]|[.]|[/]|[\\]|[ ])([1-9]|[0-2][0-9]|(3)[0-1])([-]|[.]|[/]|[\\]|[ ])\\d{2,4}))"] , "taggers" : ["(((date)|(dob)|(expiry)|(doj)||(born)|(time)|(timestamp)|(until)|(till)|(validfrom)|(stamp))(.*?))"]}','Any date or timeperiod');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('Credit Card', 'MATCHED', '["COMMON"]', '{"patterns" : ["(^(?:4[0-9]{12}(?:[0-9]{3})?|(?:5[1-5][0-9]{2}|^3(?:0[0-5]|[68][0-9])[0-9]{11}$| 222[1-9]|22[3-9][0-9]|2[3-6][0-9]{2}|27[01][0-9]|2720)[0-9]{12}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|6(?:011|5[0-9]{2})[0-9]{12}|(?:2131|1800|35\\d{3})\\d{11})$)|(\\d{4}\\.\\d{4}\\.\\d{4}\\.\\d{3,4}|\\d{4}\\-\\d{4}\\-\\d{4}\\-\\d{3,4}|\\d{4} \\d{4} \\d{4} \\d{3,4}|\\d{8} \\d{8}|\\d{4} \\d{6} \\d{6}|(\\d{16})|(\\d{14})|(\\d{19})|(\\d{15}))" ] , "taggers" : ["(((credit card)|(creditcard)|(credit card is)|(credit card number)|(credit card no.)|(credit card no)|(credit)|(card number)|(cardnumber)|(cc(.*)debit card)|(debit card)|(debitcard))(.*?))"]}', 'Any credit/debit card number');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('zipcode', 'MATCHED', '["COMMON"]', '{"patterns" : ["(^[0-9]{5}(?:-[0-9]{4})?$)|(\\d{5}(-\\d{3,4})?)" ] , "taggers" : ["(((zip)|(zip code)|(zip cod)|(ZIPCODE)|(zipcode)|(zip_code)|(zip)|(postal_code)|(postalcode)|(postcode)|(post_code)|(pincode))(.*?))"]}','Any ZipCode or Postal Code number');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('phone_no', 'MATCHED', '["COMMON"]', '{"patterns" : ["(d{3}.d{3}.d{4}|d{3}-d{3}-d{4}|^[+]{1}(?:[0-9\\-\\(\\)\\/|\\.]\\s?){6, 15}[0-9]{1}$|\\d{3}\\s\\d{3}\\s\\d{4}|\\(\\d{3}\\)\\d{3}\\s\\d{4}|\\(\\d{3}\\)\\s\\d{3}\\s\\d{4}|\\(\\d{3}\\)-\\d{3}-\\d{4}|\\(\\d{3}\\)\\d{3}-\\d{4})|((\\+1\\s?|)?(\\([2-9][0-8][0-9]\\)|[2-9][0-8][0-9])[\\-\\.\\s][2-9]([1][02-9]|[02-9][1]|[02-9][02-9])[\\s\\-\\.]?\\d{4})|((\\+1\\s?|)?(\\([2-9][0-8][0-9]\\)|[2-9][0-8][0-9])[2-9]([1][02-9]|[02-9][1]|[02-9][02-9])\\d{4})" ] , "taggers" : ["(((home)|(fax)|(office)|(phone number)|(call in)|(at)|(phone)|(PHONE NUMBER)|(ph_number)|(phone_number)|(phone_no)|(contact)|(mobile_number)|(landline_number)|(mobile)|(landline)|(office_number)|(residence_number)|(contact_number)|(phone_num)|(cellphone)|(extension)|(direct_number)|(phn)|(phone)|(phon)|(call)|(hometel))(.*?))"]}', 'Any Kind of contact number cellphone, telephone etc.');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('money', 'MATCHED', '["COMMON"]', '{"patterns" : ["((\\$[0-9]+(\\.[0-9]{1,2})?))"] , "taggers" : ["(((amount)|(amt)|(balance)|(salary)|(cost)|(price)|(value)|(cash)|(asset)|(discount)|(rate))(.*?))"]}','Monetary values in dollars');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('Bank Account Number', 'MATCHED', '["COMMON"]', '{"patterns" : ["(?:4[0-9]{12}(?:[0-9]{3})?|[25][1-7][0-9]{14}|6(?:011|5[0-9][0-9])[0-9]{12}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|(?:2131|1800|35\\d{3})\\d{11})|((\\d{12}|\\d{4}-\\d{4}-\\d{4}|\\d{4}.\\d{4}.\\d{4}|\\d{4} \\d{4} \\d{4}))|((?:[0-9]{11}|[0-9]{2}-[0-9]{3}-[0-9]{6}))|((\\d{11}|\\d{2}-\\d{3}-\\d{6}))"] , "taggers" : ["(((BANK ACCOUNT NUMBER)|(account_number)|(account)|(loan)|(acct)|(dunsno)|(accno)|(cusact)|(acno)|(bank)|(bnk)|(orig)|(individual retirement account)|(bank account)|(bank account number)|(bank acc)|(ban)|(account number)|(loan number)|(account))(.*?))"]}','Any kind of account number');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('address', 'MATCHED', '["COMMON"]', '{"patterns" : ["(.*[aA]ve.*|.*[pP]o [bB]ox.*|.*[rR]d.*|.*[rR]oad.*|.*[sS]t.*|.*[sS]treet.*|.*[aA]rea.*|.*[lL]ane.*)"] , "taggers" : ["(((place)|(road)|(street)|(addressline1)|(addressline2)|(address_line1)|(address_line2)|(landmark)|(locality)|(billing_address)|(shipping_address)|(address)|(add)|(addr)|(adress)|(addres)|(line)|(recipient)|(pptyst)|(adln)|(stcl)|(pstcd)|(lneno)|(aptno)|(hsnm)|(hsno)|(house)|(post)|(property)|(bkatad)|(bkatzp)|(asscty)|(strt)|(prty)|(wrklct)|(adr)|(bldg)|(stad)|(strad)|(prevad)|(curad)|(newad)|(address)|(addr)|(address)|(adress))(.*?))"]}','Any kind of place, address or locality');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('ITIN', 'MATCHED', '["COMMON"]', '{"patterns" : ["((9\\d{2})([ \\-]?)([7]\\d|8[0-8])([ \\-]?)(\\d{4}))"] , "taggers" : ["(((individual taxpayer id number)|(individual taxpayer id no)|(Individual Taxpayer Identification Number)|(individual taxpayer identification no)|(itin)|(\\(itin\\)))(.*?))"]}','Individual Taxpayer Identification Number');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('EIN', 'MATCHED', '["COMMON"]', '{"patterns" : ["([0-9]{2}(-)?[0-9]{7})|(\\d{2}[\\-\\. ]\\d{7}|\\d{7}[\\-\\. ]\\d{2}|\\d{3}[\\-\\. ]\\d{6}|\\d{6}[\\-\\. ]\\d{3})"] , "taggers" : ["(((ein)|(\\(ein\\))|(employer identification number)|(federal employer identification number)|(federal tax identification number))(.*?))"]}','employer identification number or federal tax identification number');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('Passport', 'MATCHED', '["COMMON"]', '{"patterns" : ["((?!0+$)[a-zA-Z0-9]{6,9})"] , "taggers" : ["(((PASSPORT)|(passport)|(passport_num)|(passport_number)|(passport_no)|(psprt))(.*?))"]}','Passport Number');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('Medicare ID', 'MATCHED', '["COMMON"]', '{"patterns" : ["[A-Z]{3}(\\s)?[0-9]{4}|(\\d){3}(-)?(\\d){2}(-)?(\\d){4}(A|B[1-7]?|M|T|C[1-4]|D)"] , "taggers" : ["((([mM]edicare)|([mM]edicare id)|([mM]edicare no)|([mM]edicare number)|([mM]edicareid)|([mM]edicare_id))(.*?))"]}','Medicare Benificiary Identifier, Medicare Number');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('driving license', 'MATCHED', '["COMMON"]', '{"patterns" : ["([A-Z]{0,1}[0-9]{6,8}|[A-Z]{0,1}[0-9]{11,14})"] , "taggers" : ["((((^|\\s|\\-|\\*|\\#)+?(d[\\.\\-]?l[\\.\\-]?)([\\s\\,\\.\\:\\-\\#]))|(driver license)|(driving license)|(lic)|(did)|(license no)|(license id)|(drivers license)|(license or id no)|(license number))(.*?))"]}', 'License Number');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('IP Address', 'MATCHED', '["COMMON"]', '{"patterns" : ["((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?))"] , "taggers" : ["((([iI][pP] [aA]ddress)|([iI][pP])|([iI][pP] [aA]ddr)|([iI][pP] [aA]d)|([iI][pP] [aA]DDRESS)|([iI][pP])|([iI][pP]v4)|([iI][pP]v6)|([iI][pP]_[aA]ddress)|([iI][pP]_[aA]dd))(.*?))"]}','IP Address');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('WEB URL', 'MATCHED', '["COMMON"]', '{"patterns" : ["((((https?|ftp|smtp):\\/\\/)|(www\\.))[a-z0-9]+(\\.[a-z]{2,}){1,3}(#?\\/?[a-zA-Z0-9#]+)*\\/?(\\?[a-zA-Z0-9-_]+=[a-zA-Z0-9-%\\._&=]+&?)?)"] , "taggers" : ["(((web url)|(url)|(link)|(website)|(domain)|(LINKS)|(uniform_resource_locator)|(webaddress)|(link)|(url)|(website)|(webpage)|(weblink)|(portal)|(links))(.*?))"]}','Any website, webpage, url, link, site etc.');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('IRA', 'MATCHED', '["COMMON"]', '{"patterns" : ["([A-Z0-9]{3}-[A-Z0-9]{5})"] , "taggers" : ["(((ira)|(individual retirement)|(individual retirement acc)|(individual retirement ac)|(individual retirement account))(.*?))" ]}','Individual Retirement Account Number');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('email', 'MATCHED', '["COMMON"]', '{"patterns" : ["([\\w]+[\\.]?[\\w]+\\@[\\w]+[\\.][a-zA-Z]+[\\.]?[a-zA-Z]+)"] , "taggers" : ["(((email)|(mail)|(gmail)|(outlook)|(e-mail)|(e mail)|(EMAIL)|(email)|(webaddress)|(web_address)|(email_id)|(emailid)|(mailid)|(mail_id)|(mail)|(eml))(.*?))"]}','Any Email-id');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('pin', 'MATCHED', '["COMMON"]', '{"patterns" : ["(\\d{6}|\\d{5}|\\d{4})"] , "taggers" : ["(((pin)|(pins)|(personal identification no)|(personal identification number))(.*?))"]}','Personal Identification Number');
+--- provide regex
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('user id', 'MATCHED', '["COMMON"]', '{"patterns" : [".*?"] , "taggers" : ["((((^|\\s)+?(userid)([\\s\\,\\.\\:\\-\\#]))|(userid)|(username)|(credentials are)|(credentials)|(user id)|(user)|(admin)|(account id)|(accountid)|(loginid)|(login id)|(signin)|(sign in)|(logon)|(login)|(logonid)|(logon_id)|(sign_in))(.*?))"]}','userid, signin/login/account id, username');
+--- provide regex
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('ABA', 'MATCHED', '["COMMON"]', '{"patterns" : ["(\\d{9})|(\\d{4}[-]\\d{4}[-]\\d{1,2})|(\\d{8})|(\\d{10})"] , "taggers" : ["((((^|\\s|\\-|\\*|\\#)+?(a[\\.\\-]?b[\\.\\-]?a[\\.\\-]?)([\\s\\,\\.\\:\\-\\#]))|(aba number)|(aba_number)|(aba code)|(aba_routing)|(aba routing)|(aba no.)|(aba.no.)|(routing number)|(routing))(.*?))"]}','ABA Routing Number');
+---provide regex
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('TIN', 'MATCHED', '["COMMON"]', '{"patterns" : ["((9\\d{2})([ \\-]?)([7]\\d|8[0-8])([ \\-]?)(\\d{4}))"] , "taggers" : ["(((tin)|(\\(tin\\))|(ax id)|(tid)|(txid)|(tx id)|(((taxpayer)|(tax)|(tx))(\\D{0,2})((identification)|(id))(\\D{0,12})((number)|(num)|(no)))|(((taxpayer)|(tax)|(tx))(\\D{0,2})((identification)|(id)))|(((taxpayer)|(tax)|(tx))(\\D{0,2})(((number)|(num)|(no)))))(.*?))"]}','Taxpayer Identification Number');
+---provide regex
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('Sec Ques', 'MATCHED', '["COMMON"]', '{"patterns" : [".*"] , "taggers" : [ "((what)|(who)|(where)|(question)|(challenge question)|(challenge questions))" ]}','Security Questions');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('cvv', 'MATCHED', '["COMMON"]', '{"patterns" : ["(\\d{4}|\\d{3})"] , "taggers" : ["(((cvv)|(c v v)|(cvvnumber)|(cvv number)|(cav)|(c a v)|(cid)|(c i d)|(csc)|(c s c)|(cvc)|(c v c)|(cvd)|(c v d)|(cve)|(c v e)|(cvn)|(c v n)|(cardauthenticationvalue)|(card authentication value)|(cardidentificationnumber)|(card identification number)|(cardid)|(card id)|(cardidentificationcode)|(card validation code)|(card identification code)|(cardsecuritycode)|(card security code)|(cardvalidationcode)|(card validation code)|(cardverificationdata)|(card verification data)|(eloverificationcode)|(elo verification code)|(cardvalidationnumber)|(cardverificationvalue)|(card verification value)|(securitycode)|(security code)|(validationcode)|(validation code)|(verificationno)|(verification no)|(verificationnumber)|(verification number)|(authenticationvalue)|(authentication value)|(identificationcode)|(identification code)|(verification data)|(validation number)|(validationnumber)|(verificationvalue)|(verification value)|(cvvi)|(c v v i)|(card validation code)|(cardvalidationcode)|(card validation number)|(back number)|(backnumber)|(sc))(.*?))"]}','Card Verification Value (CVV number)/Card Identification Number');
+---provide regex
+--insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('id', 'MATCHED', '["COMMON"]', '{"patterns" : [] , "taggers" : ["(^|\\s|\\-|\\*|\\#)+?(id)(\\s+is\\s|\\s+as\\s|\\s+be\\s|\\s*[\\:\\-\\#]|\\s)"]}');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('iin_mastercard', 'MATCHED', '["COMMON"]', '{"patterns" : ["(5[1-5]\\D)|([2][2-7][0-9][0-9]\\D)"] , "taggers" : ["(((Issuer Identification Number)|(iin)|(IIN)|(issuer id no)|(issuer id number)|(iin_providers)|(iin_mastercard)|(iin mastercard))(.*[mM][aA][sS][tT][eE][rR][cC][aA][rR][dD].*))"]}','Issuer Identification Number Mastercard');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('iin_visa', 'MATCHED', '["COMMON"]', '{"patterns" : ["\\d{1}\\D"] , "taggers" : ["(((Issuer Identification Number)|(iin)|(IIN)|(issuer id no)|(issuer id number)|(iin_providers)|(iin_visa)|(iin visa))(.*[vV][iI][sS][aA].*))"]}','Issuer Identification Number VISA');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('iin_americanexpress', 'MATCHED', '["COMMON"]', '{"patterns" : ["3[47]\\d{4,5}\\D"] , "taggers" : ["(((Issuer Identification Number)|(iin)|(IIN)|(issuer id no)|(issuer id number)|(iin_providers)|(iin_americanexpress))(.*[aA][mM][eE][rR][iI][cC][aA][nN].*))"]}','Issuer Identification Number AmericanExpress');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('iin_jcb', 'MATCHED', '["COMMON"]', '{"patterns" : ["(?:2131|1800|35)\\D"] , "taggers" : ["(((Issuer Identification Number)|(iin)|(IIN)|(issuer id no)|(issuer id number)|(iin_providers)|(iin_jcb))(.*[jJ][cC][bB].*))"]}','Issuer Identification Number JCB');
+---^3(?:0[0-5]|[68][0-9])[0-9]{11}$
+-- 3(?:0[0-5]|[68])
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('iin_dinnersclub', 'MATCHED', '["COMMON"]', '{"patterns" : ["3(?:0[0-5]|[68])\\D"] , "taggers" : ["(((Issuer Identification Number)|(iin)|(IIN)|(issuer id no)|(issuer id number)|(iin_providers)|(iin_dinersclub)|(iin_dinnersclub))(.*[dD][iI][nN].*))"]}','Issuer Identification Number Diners Club');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('iin_discover', 'MATCHED', '["COMMON"]', '{"patterns" : ["6(?:011|5)\\D"] , "taggers" : ["(((Issuer Identification Number)|(iin)|(IIN)|(issuer id no)|(issuer id number)|(iin_providers)|(iin_discover))(.*[dD][iI][sS][cC].*))"]}','Issuer Identification Number');
+---
+--insert into entities(entity_identifier, entity_type, entity_tags, entity_args) values('exc_datecc', 'MATCHED', '["COMMON"]', '{"patterns" : ["((\b([0-3][0-9]|[1-9])\\D{0,3})?\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|(nov|dec)(?:ember)?)\\D?(([0-3][0-9]|[1-9])(st|nd|rd|th)?)?(\\D*)?((19[7-9]\\d|20\\d{2})|\\d{2})[\\W|\\s|\b])"] , "taggers" : ["(((exc_datecc)|(cvv)|(c v v)|(cvvnumber)|(cvv number)|(cav)|(c a v)|(cid)|(c i d)|(csc)|(c s c)|(cvc)|(c v c)|(cvd)|(c v d)|(cve)|(c v e)|(cvn)|(c v n)|(cardauthenticationvalue)|(card authentication value)|(cardidentificationnumber)|(card identification number)|(cardid)|(card id)|(cardidentificationcode)|(card validation code)|(card identification code)|(cardsecuritycode)|(card security code)|(cardvalidationcode)|(card validation code)|(cardverificationdata)|(card verification data)|(eloverificationcode)|(elo verification code)|(cardvalidationnumber)|(cardverificationvalue)|(card verification value)|(securitycode)|(security code)|(validationcode)|(validation code)|(verificationno)|(verification no)|(verificationnumber)|(verification number)|(authenticationvalue)|(authentication value)|(identificationcode)|(identification code)|(verification data)|(validation number)|(validationnumber)|(verificationvalue)|(verification value)|(cvvi)|(c v v i)|(card validation code)|(cardvalidationcode)|(card validation number)|(back number)|(backnumber)|(sc))(.*))"]}');
+---
+--insert into entities(entity_identifier, entity_type, entity_tags, entity_args) values('exc_date', 'MATCHED', '["COMMON"]', '{"patterns" : ["\b((\\d\\D\\d\\d)|(\\d\\d\\D\\d)|(\\d{3}((?! )\\D)\\d{1})|(\\d{2}((?! )\\D)\\d{2})|(\\d{1}((?! )\\D)\\d{3})|(\\d\\D\\d\\D\\d\\d))\b"] , "taggers" : ["exc_date", "cvv","c v v","cvvnumber","cvv number","cav","c a v","cid","c i d","csc","c s c","cvc","c v c","cvd","c v d","cve","c v e","cvn","c v n","cardauthenticationvalue","card authentication value","cardidentificationnumber","card identification number","cardid","card id","cardidentificationcode","card validation code","card identification code","cardsecuritycode","card security code","cardvalidationcode","card validation code","cardverificationdata","card verification data","eloverificationcode","elo verification code","cardvalidationnumber","cardverificationvalue","card verification value","securitycode","security code","validationcode","validation code","verificationno","verification no","verificationnumber","verification number","authenticationvalue","authentication value","identificationcode","identification code","verification data","validation number","validationnumber","verificationvalue","verification value","cvvi","c v v i","card validation code","cardvalidationcode","card validation number","back number","backnumber","sc"]}');
+---
+--insert into entities(entity_identifier, entity_type, entity_tags, entity_args) values('exc_money', 'MATCHED', '["COMMON"]', '{"patterns" : ["(\\b\\$[\\d\\W]*\\b)"] , "taggers" : ["(((exc_datecc)|(cvv)|(c v v)|(cvvnumber)|(cvv number)|(cav)|(c a v)|(cid)|(c i d)|(csc)|(c s c)|(cvc)|(c v c)|(cvd)|(c v d)|(cve)|(c v e)|(cvn)|(c v n)|(cardauthenticationvalue)|(card authentication value)|(cardidentificationnumber)|(card identification number)|(cardid)|(card id)|(cardidentificationcode)|(card validation code)|(card identification code)|(cardsecuritycode)|(card security code)|(cardvalidationcode)|(card validation code)|(cardverificationdata)|(card verification data)|(eloverificationcode)|(elo verification code)|(cardvalidationnumber)|(cardverificationvalue)|(card verification value)|(securitycode)|(security code)|(validationcode)|(validation code)|(verificationno)|(verification no)|(verificationnumber)|(verification number)|(authenticationvalue)|(authentication value)|(identificationcode)|(identification code)|(verification data)|(validation number)|(validationnumber)|(verificationvalue)|(verification value)|(cvvi)|(c v v i)|(card validation code)|(cardvalidationcode)|(card validation number)|(back number)|(backnumber)|(sc))(.*))"]}');
+---
+--insert into entities(entity_identifier, entity_type, entity_tags, entity_args) values('cvv_com', 'MATCHED', '["COMMON"]', '{"patterns" : ["((\\b(regext)\\b)(((?!\\d{3,4})\\w|\\s)*?(\\b\\d{3,4}\\b)))|(\\b(regext))(\\d{3,4}\\b)"] , "taggers" : ["(((exc_datecc)|(cvv)|(c v v)|(cvvnumber)|(cvv number)|(cav)|(c a v)|(cid)|(c i d)|(csc)|(c s c)|(cvc)|(c v c)|(cvd)|(c v d)|(cve)|(c v e)|(cvn)|(c v n)|(cardauthenticationvalue)|(card authentication value)|(cardidentificationnumber)|(card identification number)|(cardid)|(card id)|(cardidentificationcode)|(card validation code)|(card identification code)|(cardsecuritycode)|(card security code)|(cardvalidationcode)|(card validation code)|(cardverificationdata)|(card verification data)|(eloverificationcode)|(elo verification code)|(cardvalidationnumber)|(cardverificationvalue)|(card verification value)|(securitycode)|(security code)|(validationcode)|(validation code)|(verificationno)|(verification no)|(verificationnumber)|(verification number)|(authenticationvalue)|(authentication value)|(identificationcode)|(identification code)|(verification data)|(validation number)|(validationnumber)|(verificationvalue)|(verification value)|(cvvi)|(c v v i)|(card validation code)|(cardvalidationcode)|(card validation number)|(back number)|(backnumber)|(sc))(.*))"]}');
+---
+--insert into entities(entity_identifier, entity_type, entity_tags, entity_args) values('cvv_lef', 'MATCHED', '["COMMON"]', '{"patterns" : ["((\\b\\d{3,4}\\b)(((?!\\d{3,4})\\w|\\s)*?(\\b(regext)\\b)((?![ |\\w]*\\b\\d{3,4}\\b))))|(\\b\\d{3,4})((regext)\\b)"] , "taggers" : ["(((exc_datecc)|(cvv)|(c v v)|(cvvnumber)|(cvv number)|(cav)|(c a v)|(cid)|(c i d)|(csc)|(c s c)|(cvc)|(c v c)|(cvd)|(c v d)|(cve)|(c v e)|(cvn)|(c v n)|(cardauthenticationvalue)|(card authentication value)|(cardidentificationnumber)|(card identification number)|(cardid)|(card id)|(cardidentificationcode)|(card validation code)|(card identification code)|(cardsecuritycode)|(card security code)|(cardvalidationcode)|(card validation code)|(cardverificationdata)|(card verification data)|(eloverificationcode)|(elo verification code)|(cardvalidationnumber)|(cardverificationvalue)|(card verification value)|(securitycode)|(security code)|(validationcode)|(validation code)|(verificationno)|(verification no)|(verificationnumber)|(verification number)|(authenticationvalue)|(authentication value)|(identificationcode)|(identification code)|(verification data)|(validation number)|(validationnumber)|(verificationvalue)|(verification value)|(cvvi)|(c v v i)|(card validation code)|(cardvalidationcode)|(card validation number)|(back number)|(backnumber)|(sc))(.*))"]}');
+---
+--insert into entities(entity_identifier, entity_type, entity_tags, entity_args) values('exc_cc', 'MATCHED', '["COMMON"]', '{"patterns" : ["(\\b\\d{4} \\d{4} \\d{4} \\d{4}\\b)"] , "taggers" : ["(((exc_datecc)|(cvv)|(c v v)|(cvvnumber)|(cvv number)|(cav)|(c a v)|(cid)|(c i d)|(csc)|(c s c)|(cvc)|(c v c)|(cvd)|(c v d)|(cve)|(c v e)|(cvn)|(c v n)|(cardauthenticationvalue)|(card authentication value)|(cardidentificationnumber)|(card identification number)|(cardid)|(card id)|(cardidentificationcode)|(card validation code)|(card identification code)|(cardsecuritycode)|(card security code)|(cardvalidationcode)|(card validation code)|(cardverificationdata)|(card verification data)|(eloverificationcode)|(elo verification code)|(cardvalidationnumber)|(cardverificationvalue)|(card verification value)|(securitycode)|(security code)|(validationcode)|(validation code)|(verificationno)|(verification no)|(verificationnumber)|(verification number)|(authenticationvalue)|(authentication value)|(identificationcode)|(identification code)|(verification data)|(validation number)|(validationnumber)|(verificationvalue)|(verification value)|(cvvi)|(c v v i)|(card validation code)|(cardvalidationcode)|(card validation number)|(back number)|(backnumber)|(sc))(.*))"]}');
+---
+--insert into entities(entity_identifier, entity_type, entity_tags, entity_args) values('cvv_or', 'MATCHED', '["COMMON"]', '{"patterns" : ["((\\b(regext)\\b\\s)(is|are|were|was|\\W|\\s|be|as|may|might|can)*((\\b\\d{3,4}\\b)(\\s(or|and)\\s)(\\b\\d{3,4}\\b))(((\\s(or|and)\\s)(\\b\\d{3,4}\\b))?))"] , "taggers" : ["(((exc_datecc)|(cvv)|(c v v)|(cvvnumber)|(cvv number)|(cav)|(c a v)|(cid)|(c i d)|(csc)|(c s c)|(cvc)|(c v c)|(cvd)|(c v d)|(cve)|(c v e)|(cvn)|(c v n)|(cardauthenticationvalue)|(card authentication value)|(cardidentificationnumber)|(card identification number)|(cardid)|(card id)|(cardidentificationcode)|(card validation code)|(card identification code)|(cardsecuritycode)|(card security code)|(cardvalidationcode)|(card validation code)|(cardverificationdata)|(card verification data)|(eloverificationcode)|(elo verification code)|(cardvalidationnumber)|(cardverificationvalue)|(card verification value)|(securitycode)|(security code)|(validationcode)|(validation code)|(verificationno)|(verification no)|(verificationnumber)|(verification number)|(authenticationvalue)|(authentication value)|(identificationcode)|(identification code)|(verification data)|(validation number)|(validationnumber)|(verificationvalue)|(verification value)|(cvvi)|(c v v i)|(card validation code)|(cardvalidationcode)|(card validation number)|(back number)|(backnumber)|(sc))(.*))"]}');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('password', 'MATCHED', '["COMMON"]', '{"patterns" : ["(?!word)(?!:)(?!wrd)(?!wrd:)(?!word:)(?!sword:)(.*?)"] , "taggers" : ["(((pw)|(pwd)|(pass word)|(password)|(passwrd)|(security_key)|(securitykey)|(passcode)|(psdwd)|(pswd)|(contraseÄ)|(Â±a))(\\s|[:]|(.*[:]))(.*?))"]}','Any password or security code');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('Combo Credit Card', 'MATCHED', '["COMMON"]', '{"patterns" : ["((^(?:4[0-9]{12}(?:[0-9]{3})?|(?:5[1-5][0-9]{2}| 222[1-9]|22[3-9][0-9]|2[3-6][0-9]{2}|27[01][0-9]|2720)[0-9]{12}|3[47][0-9]{13}|3(?:0[0-5]|[68][0-9])[0-9]{11}|6(?:011|5[0-9]{2})[0-9]{12}|(?:2131|1800|35\\d{3})\\d{11})$)|(\\d{4}\\.\\d{4}\\.\\d{4}\\.\\d{3,4}|\\d{4}\\-\\d{4}\\-\\d{4}\\-\\d{3,4}|\\d{4} \\d{4} \\d{4} \\d{3,4}|\\d{8} \\d{8}|\\d{4} \\d{6} \\d{6}|\\d{15,16}))(.*?)(((\\d{3}|\\d{4})(.*?)(([1][0-2])|([0][1-9])|[1-9])([-]|[/]|[\\]|[.]|[ ])(\\d{2,4}))|((([1][0-2])|([0][1-9])|[1-9])([-]|[\\/]|[\\]|[.]|[ ])(\\d{2,4})(.*?)(\\d{3}|\\d{4})))"], "taggers" : ["(((credit card)|(creditcard)|(card number)|(credit)|(creditcombo)|(credit combo)|(creditcard combo)|(credit card combo)|(cardnumber)|(cc(.*)debit card)|(debit card)|(debitcard))(.*?))"]}','Combo credit card or debit card number');
+---
+insert into entities(entity_identifier, entity_type, entity_tags, entity_args, entity_description) values('UserIdPass Combo', 'MATCHED',  '["COMMON"]', '{"patterns" : [".*"] , "taggers" : ["(^(?=(.*(\\buserid\\b)|(\\busername\\b)|(\\buser\\b)|(\\badmin\\b)|(\\baccount id\\b)|(\\baccountid\\b)|(\\bloginid\\b)|(\\blogin id\\b)|(\\bsignin\\b)|(\\bsign in\\b)|(\\blogon\\b)|(\\blogin\\b)|(\\blogonid\\b)|(\\blogon_id\\b)|(\\bsign_in\\b)))(?=(.*((\\bpwd\\b)|(\\bpw\\b)|(\\bpass word\\b)|(\\bpassword)\\b|(\\bpasswrd\\b)|(\\bsecurity_key\\b)|(\\bsecuritykey\\b)|(\\bpasscode\\b)|(\\bpsdwd\\b)|(\\bpswd\\b)|(\\bcontraseÄ\\b)))).*$)"]}', 'For Userid and password combo');
+
+-----existing entities in prev script
+--insert into entities(entity_identifier, entity_type, entity_tags, entity_args) values('Employee Number', 'MATCHED', '["COMMON"]', '{"patterns" : ["\\d{2}\\-\\d{7}"], "taggers" : []}');
+--insert into entities(entity_identifier, entity_type, entity_tags, entity_args) values('MAC Address', 'MATCHED', '["COMMON","NETWORK"]', '{"patterns" : ["\\b([0-9A-Fa-f]{2}[:\\-]){5}([0-9A-Fa-f]{2})\\b"], "taggers" : []}');
+--insert into entities(entity_identifier, entity_type, entity_tags, entity_args) values('UUID', 'MATCHED', '["COMMON","NETWORK"]', '{"patterns" : ["\\b[0-9a-fA-F]{8}\\b[- ][0-9a-fA-F]{4}[- ][0-9a-fA-F]{4}[- ][0-9a-fA-F]{4}[- ]\\b[0-9a-fA-F]{12}\\b"], "taggers" : []}');
+--insert into entities(entity_identifier, entity_type, entity_tags, entity_args) values('Reset Response', 'MATCHED', '["COMMON"]', '{"patterns" : ["\\b(Response)?\\(446\\)\\s\\-\\s\\b.*"], "taggers" : []}');
+--insert into entities(entity_identifier, entity_type, entity_tags, entity_args) values('Termination Response', 'MATCHED', '["COMMON"]', '{"patterns" : ["\\b(Response)?\\(783\\)\\s\\-\\s\\b.*"], "taggers" : []}');
+--insert into entities(entity_identifier, entity_type, entity_tags, entity_args) values('Customer ID', 'MATCHED', '["COMMON"]', '{"patterns" : ["\\bC\\w\\d\\-?\\d{7}\\-?\\d{5}\\-?\\d{2}\\b"], "taggers" : ["(((CUSTOMER ID)|(customer_id)|(customerid)|(custid)|(cust_id))(.*))"]}');
+
+
+
+---updmar1
+
+
+
+-- Insert Default Configuration in database
+insert into configurations(configuration_name, open_compressed_file, force_text_read, file_encoding)  values ('Default', 0,1,'UTF-8');
+insert into configurations(configuration_name, open_compressed_file, force_text_read, file_encoding)  values ('All_Matched', 0,1,'UTF-8');
+
+---existing entities new config 3
+--insert into configurations(configuration_name, open_compressed_file, force_text_read, file_encoding)  values ('sample_existing_entities_config', 0,1,'UTF-8');
+
+
+insert into config_entities(configuration_id, entity_id) values (1,1), (1,2), (1,3), (1,4), (1,5), (1,6), (1,7), (1,8), (1,9), (1,10), (1,11), (1,12), (1,13), (1,14), (1,15),
+(1,16), (1,17), (1,18), (1,19), (1,20), (1,21), (1,22), (1,23), (1,24), (1,25), (1,26), (1,27), (1,28), (1,29), (1,30), (1,31), (1,32), (1,33), (1,34), (1,35), (1,36), (1,37),
+(1,38), (1,39), (1,40), (1,41), (1,42), (1,43), (1,44), (1,45), (1,46), (1,47), (1,48), (1,49), (1,50), (1,51);
+insert into config_entities(configuration_id, entity_id) values (2,19), (2,20), (2,21), (2,22), ( 2,23), ( 2,24), ( 2,25), ( 2,26), ( 2,27), ( 2,28), ( 2,29), ( 2,30), ( 2,31),
+( 2,32), ( 2,33), ( 2,34), ( 2,35), ( 2,36), ( 2,37), (2,38), (2,39), (2,40), (2,41), (2,42), (2,43), (2,44), (2,45), (2,46), (2,47), (2,48), (2,49), (2,50), (2,51);
+
+
+--- new config existing entities insert statement
+--insert into config_entities(configuration_id, entity_id) values (3,58), (3,59), (3,60), (3,61), (3,62), (3,63);
+
+
+
+COMMIT TRANSACTION;
+PRAGMA foreign_keys = on;
+
+the above one is inside UDD_LIB/runtime folder called script.sql
